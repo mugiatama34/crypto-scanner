@@ -1,7 +1,7 @@
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  OKX — BÜYÜK RALLİ SONRASI FİBO BÖLGESINDE                        ║
 # ║        İKİLİ DİP + RSI POZİTİF UYUMSUZLUĞU TARAYICI              ║
-# ║  4 Saatlik | Nisan 2026+ | Google Colab | v1.0                     ║
+# ║  4 Saatlik | Nisan 2026+ | v1.1                                    ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 #
 # ARANAN YAPI:
@@ -22,21 +22,89 @@
 #        │
 #        └─► POZİTİF UYUMSUZLUK ✅ + FİBO BÖLGE TEYIDI ✅
 #
-# ─── HÜCRE 1 — Kurulum ───────────────────────────────────────────────
-# !pip install ccxt pandas numpy tqdm openpyxl -q
+# Bağımlılıklar için requirements.txt dosyasına bakın.
+# Çalıştırma:
+#   python okx_double_bottom_divergence_v1.py
+#   python okx_double_bottom_divergence_v1.py --test-symbol EUL/USDT --debug
+#
+# ── OKX API KİMLİK BİLGİLERİ (opsiyonel) ──────────────────────────────
+# Bu script yalnızca herkese açık (public) OHLCV uç noktalarını kullanır,
+# bu yüzden API anahtarı gerektirmez. Yine de kimlik bilgisi gereken bir
+# uç nokta eklenirse aşağıdaki ortam değişkenleri otomatik okunur:
+#   OKX_API_KEY, OKX_API_SECRET, OKX_API_PASSPHRASE
+# Kod içine ASLA sabit (hardcoded) anahtar yazmayın.
 
-
-# ─── HÜCRE 2 — Import & Ayarlar ──────────────────────────────────────
-
+import argparse
 import ccxt
-import pandas as pd
-import numpy as np
+import json
+import logging
+import os
 import time
 import warnings
 from datetime import datetime, timezone
-from tqdm.notebook import tqdm
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
+
+# ── LOGLAMA ────────────────────────────────────────────────────────────
+# Bulunan sinyaller konsola basılmaz; signals.log (insan-okunur) ve
+# signals.json (makine-okunur) dosyalarına yazılır. GitHub Actions
+# çalıştırmalarında bu dosyalar artifact olarak toplanabilir.
+LOG_FILE     = os.environ.get("SIGNALS_LOG_FILE", "signals.log")
+SIGNALS_JSON = os.environ.get("SIGNALS_JSON_FILE", "signals.json")
+
+logger = logging.getLogger("okx_scanner")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+logger.handlers.clear()
+
+_file_handler = logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+_file_handler.setLevel(logging.INFO)
+logger.addHandler(_file_handler)
+
+# Konsola sadece durum/özet mesajları düşer (WARNING), tek tek bulunan
+# sinyaller yalnızca dosyaya (INFO) yazılır.
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(logging.Formatter("%(message)s"))
+_console_handler.setLevel(logging.WARNING)
+logger.addHandler(_console_handler)
+
+
+def log_status(msg):
+    """Konsol + dosyaya yazılan durum/özet mesajı."""
+    logger.warning(msg)
+
+
+def log_signal(msg):
+    """Sadece dosyaya (signals.log) yazılan sinyal detayı."""
+    logger.info(msg)
+
+
+# ── OKX BAĞLANTISI ──────────────────────────────────────────────────────
+OKX_API_KEY        = os.environ.get("OKX_API_KEY", "")
+OKX_API_SECRET     = os.environ.get("OKX_API_SECRET", "")
+OKX_API_PASSPHRASE = os.environ.get("OKX_API_PASSPHRASE", "")
+
+
+def build_exchange():
+    """ccxt OKX exchange nesnesini oluşturur.
+
+    Kimlik bilgileri kod içine yazılmaz; ortam değişkenlerinden okunur.
+    Herkese açık OHLCV verisi için kimlik bilgisi gerekmez.
+    """
+    config = {"enableRateLimit": True}
+    if OKX_API_KEY and OKX_API_SECRET and OKX_API_PASSPHRASE:
+        config.update({
+            "apiKey": OKX_API_KEY,
+            "secret": OKX_API_SECRET,
+            "password": OKX_API_PASSPHRASE,
+        })
+    return ccxt.okx(config)
+
 
 # ── ZAMAN AYARLARI ────────────────────────────────────────────────────
 START_DATE_MS    = int(datetime(2026, 4, 1, tzinfo=timezone.utc).timestamp() * 1000)
@@ -70,14 +138,16 @@ LOOKBACK_CANDLES = 300     # Kaç mum geriye bakılacak
 PAUSE_SEC        = 0.22
 EXPORT_CSV       = True
 
-print("✅  Ayarlar yüklendi — İkili Dip + RSI Diverjans Tarayıcı v1.0")
-print(f"   Zaman Dilimi    : {TIMEFRAME}")
-print(f"   Min Ralli       : %{MIN_RALLY_PCT*100:.0f}")
-print(f"   Fibo Bölge      : {FIB_LOWER:.3f} – {FIB_UPPER:.3f}  (±%{FIB_TOLERANCE*100:.0f} tolerans)")
-print(f"   Min RSI Diverjans: {MIN_RSI_DIVERGE} puan")
+
+def log_settings():
+    log_status("✅  Ayarlar yüklendi — İkili Dip + RSI Diverjans Tarayıcı v1.1")
+    log_status(f"   Zaman Dilimi    : {TIMEFRAME}")
+    log_status(f"   Min Ralli       : %{MIN_RALLY_PCT*100:.0f}")
+    log_status(f"   Fibo Bölge      : {FIB_LOWER:.3f} – {FIB_UPPER:.3f}  (±%{FIB_TOLERANCE*100:.0f} tolerans)")
+    log_status(f"   Min RSI Diverjans: {MIN_RSI_DIVERGE} puan")
 
 
-# ─── HÜCRE 3 — Fonksiyonlar ──────────────────────────────────────────
+# ─── FONKSİYONLAR ─────────────────────────────────────────────────────
 
 def compute_rsi(close, period=14):
     """Wilder EWM yöntemiyle RSI hesaplar."""
@@ -327,14 +397,68 @@ def find_double_bottom_divergence(df, lookback):
         "candle_total"    : len(df),
     }
 
-print("✅  Fonksiyonlar hazır")
+
+def _json_default(obj):
+    """json.dump için numpy/pandas tiplerini native Python tiplerine çevirir."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    raise TypeError(f"'{type(obj)}' JSON'a çevrilemiyor")
 
 
-# ─── HÜCRE 4 — ANA TARAYICI ──────────────────────────────────────────
+def write_signal_outputs(results, skipped_data, skipped_crit, total_scanned):
+    """Bulunan sinyalleri konsol yerine signals.json / signals.log dosyalarına yazar."""
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "timeframe": TIMEFRAME,
+        "parameters": {
+            "min_rally_pct": MIN_RALLY_PCT,
+            "fib_lower": FIB_LOWER,
+            "fib_upper": FIB_UPPER,
+            "fib_tolerance": FIB_TOLERANCE,
+            "min_bounce_pct": MIN_BOUNCE_PCT,
+            "max_dip2_above": MAX_DIP2_ABOVE,
+            "min_rsi_diverge": MIN_RSI_DIVERGE,
+            "rsi_period": RSI_PERIOD,
+        },
+        "summary": {
+            "total_scanned": total_scanned,
+            "skipped_no_data": skipped_data,
+            "skipped_criteria_not_met": skipped_crit,
+            "matched": len(results),
+        },
+        "signals": results,
+    }
+
+    with open(SIGNALS_JSON, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False, default=_json_default)
+
+    for result in results:
+        log_signal(
+            f"✅  {result['symbol']:<16} | "
+            f"Ralli=%{result['rally_pct']:.0f} | "
+            f"Dip1={result['dip1_price']} RSI={result['dip1_rsi']:.1f} | "
+            f"Dip2={result['dip2_price']} RSI={result['dip2_rsi']:.1f} | "
+            f"Diverjans=+{result['rsi_divergence']:.1f} | "
+            f"Fib={result['dip2_fib_level']:.3f} | "
+            f"R/R={result['rr_ratio']}"
+        )
+
+    log_status(f"💾  Sinyaller → {SIGNALS_JSON}")
+    log_status(f"💾  Log       → {LOG_FILE}")
+
+
+# ─── ANA TARAYICI ──────────────────────────────────────────────────────
 
 def run_scanner():
-    print("🔌  OKX'e bağlanılıyor...")
-    exchange = ccxt.okx({"enableRateLimit": True})
+    log_settings()
+    log_status("🔌  OKX'e bağlanılıyor...")
+    exchange = build_exchange()
     exchange.load_markets()
 
     usdt_pairs = [
@@ -347,8 +471,8 @@ def run_scanner():
     ]
 
     total = len(usdt_pairs)
-    print(f"📊  {total} aktif USDT Spot çifti")
-    print(f"⏳  Tahmini süre: ~{total * PAUSE_SEC / 60:.0f} dakika\n")
+    log_status(f"📊  {total} aktif USDT Spot çifti")
+    log_status(f"⏳  Tahmini süre: ~{total * PAUSE_SEC / 60:.0f} dakika\n")
 
     results      = []
     skipped_data = 0
@@ -378,27 +502,19 @@ def run_scanner():
         result["symbol"] = symbol
         results.append(result)
 
-        tqdm.write(
-            f"  ✅  {symbol:<16} | "
-            f"Ralli=%{result['rally_pct']:.0f} | "
-            f"Dip1={result['dip1_price']} RSI={result['dip1_rsi']:.1f} | "
-            f"Dip2={result['dip2_price']} RSI={result['dip2_rsi']:.1f} | "
-            f"Diverjans=+{result['rsi_divergence']:.1f} | "
-            f"Fib={result['dip2_fib_level']:.3f} | "
-            f"R/R={result['rr_ratio']}"
-        )
-
         time.sleep(PAUSE_SEC)
 
     # ── Özet ─────────────────────────────────────────────────────────
-    print(f"\n{'─'*65}")
-    print(f"  Veri yetersiz  : {skipped_data}")
-    print(f"  Kriter tutmadı : {skipped_crit}")
-    print(f"  ✅  Eşleşen    : {len(results)}")
+    log_status(f"\n{'─'*65}")
+    log_status(f"  Veri yetersiz  : {skipped_data}")
+    log_status(f"  Kriter tutmadı : {skipped_crit}")
+    log_status(f"  ✅  Eşleşen    : {len(results)}")
+
+    write_signal_outputs(results, skipped_data, skipped_crit, total)
 
     if not results:
-        print("\n❌  Hiç aday bulunamadı.")
-        print("   İpucu → MIN_RALLY_PCT=0.25, MIN_RSI_DIVERGE=1.0 dene.")
+        log_status("\n❌  Hiç aday bulunamadı.")
+        log_status("   İpucu → MIN_RALLY_PCT=0.25, MIN_RSI_DIVERGE=1.0 dene.")
         return None
 
     # ── DataFrame ────────────────────────────────────────────────────
@@ -422,7 +538,7 @@ def run_scanner():
         "target_50pct"   : "Hedef %50 Geri Alım",
         "target_618pct"  : "Hedef %61.8 Geri Alım",
         "stop_loss"      : "Stop Loss (Dip2-%2)",
-        "rr_ratio"       : "R/R Oranı",
+        "rr_ratio"        : "R/R Oranı",
         "candle_total"   : "Toplam Mum",
     }
 
@@ -434,56 +550,45 @@ def run_scanner():
     df_out = df_out.sort_values("RSI Diverjans (+puan)", ascending=False)
     df_out = df_out.reset_index(drop=True)
 
-    print(f"\n{'═'*65}")
-    print(f"  🎯  {len(df_out)} adet 'İkili Dip + RSI Diverjans' adayı!\n")
-    display(df_out)
+    log_status(f"\n{'═'*65}")
+    log_status(f"  🎯  {len(df_out)} adet 'İkili Dip + RSI Diverjans' adayı! (detaylar {SIGNALS_JSON} / {LOG_FILE} dosyalarında)\n")
 
     if EXPORT_CSV:
         fn = "okx_double_bottom_divergence.csv"
         df_out.to_csv(fn, index=False, encoding="utf-8-sig")
-        print(f"\n💾  CSV → {fn}")
-        try:
-            from google.colab import files
-            files.download(fn)
-        except Exception:
-            pass
+        log_status(f"💾  CSV → {fn}")
 
     return df_out
 
 
-df_results = run_scanner()
+# ─── TEK COİN DETAYLI TEST ───────────────────────────────────────────
+def debug_test_symbol(test_symbol, debug=True):
+    """
+    Belirli bir coini test eder. Hangi adımda elendiğini görmek için
+    debug=True kullanılabilir. Otomatik taramanın bir parçası değildir;
+    yalnızca --test-symbol ile açıkça istendiğinde çalışır.
+    """
+    ex = build_exchange()
+    ex.load_markets()
 
+    log_status(f"\n🔬  {test_symbol} — Detaylı Test ({TIMEFRAME})")
+    df_t = fetch_ohlcv_paginated(ex, test_symbol, TIMEFRAME, START_DATE_MS, pause=0.3)
 
-# ─── HÜCRE 5 — TEK COİN DETAYLI TEST ────────────────────────────────
-"""
-Belirli bir coini test etmek için bu hücreyi çalıştır.
-Hangi adımda elendiğini görmek için debug_mode=True yap.
-"""
+    if df_t is None:
+        log_status("⚠️  Veri çekilemedi.")
+        return
 
-TEST_SYMBOL  = "EUL/USDT"
-DEBUG_MODE   = True          # True → adım adım açıklama yazar
+    log_status(f"   Mum sayısı  : {len(df_t)}")
+    log_status(f"   İlk mum     : {df_t.index[0]}")
+    log_status(f"   Son mum     : {df_t.index[-1]}")
+    log_status(f"   Fiyat aralığı: {df_t['low'].min():.6f} – {df_t['high'].max():.6f}")
 
-ex = ccxt.okx({"enableRateLimit": True})
-ex.load_markets()
-
-print(f"\n🔬  {TEST_SYMBOL} — Detaylı Test ({TIMEFRAME})")
-df_t = fetch_ohlcv_paginated(ex, TEST_SYMBOL, TIMEFRAME, START_DATE_MS, pause=0.3)
-
-if df_t is None:
-    print("⚠️  Veri çekilemedi.")
-else:
-    print(f"   Mum sayısı  : {len(df_t)}")
-    print(f"   İlk mum     : {df_t.index[0]}")
-    print(f"   Son mum     : {df_t.index[-1]}")
-    print(f"   Fiyat aralığı: {df_t['low'].min():.6f} – {df_t['high'].max():.6f}")
-
-    if DEBUG_MODE:
+    if debug:
         # Her adımı manuel çalıştır
-        rsi_s  = compute_rsi(df_t["close"])
         window = df_t.iloc[-min(LOOKBACK_CANDLES, len(df_t)-3):]
 
         # En büyük ralliyi bul ve göster
-        print("\n── DEBUG: Ralli Taraması ──")
+        log_status("\n── DEBUG: Ralli Taraması ──")
         n = len(window)
         best = None
         for dp in range(0, int(n*0.70) - MIN_RALLY_CANDLES):
@@ -495,20 +600,46 @@ else:
             if best is None or rp > best[2]:
                 best = (d_p, pp, rp)
         if best:
-            print(f"   En büyük ralli : {best[2]*100:.1f}%  ({best[0]:.6f} → {best[1]:.6f})")
+            log_status(f"   En büyük ralli : {best[2]*100:.1f}%  ({best[0]:.6f} → {best[1]:.6f})")
             rng = best[1] - best[0]
-            print(f"   Fibo 0.618     : {best[1] - 0.618*rng:.6f}")
-            print(f"   Fibo 0.786     : {best[1] - 0.786*rng:.6f}")
+            log_status(f"   Fibo 0.618     : {best[1] - 0.618*rng:.6f}")
+            log_status(f"   Fibo 0.786     : {best[1] - 0.786*rng:.6f}")
         else:
-            print("   Ralli bulunamadı")
+            log_status("   Ralli bulunamadı")
 
     result_t = find_double_bottom_divergence(df_t, min(LOOKBACK_CANDLES, len(df_t)-3))
 
     if result_t:
-        print(f"\n   ✅  ADAY — Tüm kriterler karşılandı!")
+        log_status("\n   ✅  ADAY — Tüm kriterler karşılandı!")
         for k, v in result_t.items():
-            print(f"      {k:<22}: {v}")
+            log_status(f"      {k:<22}: {v}")
     else:
-        print(f"\n   ❌  Kriterler karşılanmıyor.")
-        if DEBUG_MODE:
-            print("   → MIN_RALLY_PCT veya MIN_RSI_DIVERGE değerlerini gevşetmeyi dene.")
+        log_status("\n   ❌  Kriterler karşılanmıyor.")
+        if debug:
+            log_status("   → MIN_RALLY_PCT veya MIN_RSI_DIVERGE değerlerini gevşetmeyi dene.")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="OKX Büyük Ralli Sonrası Fibo Bölgesinde İkili Dip + RSI Pozitif Uyumsuzluğu Tarayıcı"
+    )
+    parser.add_argument(
+        "--test-symbol",
+        default=os.environ.get("TEST_SYMBOL"),
+        help="Taramaya ek olarak tek bir sembolü detaylı test et (örn. EUL/USDT)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=os.environ.get("DEBUG_MODE", "").lower() in ("1", "true", "yes"),
+        help="--test-symbol ile birlikte adım adım debug çıktısı üretir",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    df_results = run_scanner()
+
+    if args.test_symbol:
+        debug_test_symbol(args.test_symbol, debug=args.debug)
