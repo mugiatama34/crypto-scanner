@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+signals.json
+signals.log
+okx_double_bottom_divergence.csv
