@@ -1,26 +1,23 @@
 # ╔══════════════════════════════════════════════════════════════════════╗
-# ║  OKX — BÜYÜK RALLİ SONRASI FİBO BÖLGESINDE                        ║
-# ║        İKİLİ DİP + RSI POZİTİF UYUMSUZLUĞU TARAYICI              ║
-# ║  4 Saatlik | Nisan 2026+ | v1.1                                    ║
+# ║  OKX — A-B FİBONACCİ GERİ ÇEKİLME + ABC UZANTISI TARAYICI          ║
+# ║  4 Saatlik | v2.0                                                   ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 #
-# ARANAN YAPI:
+# ARANAN YAPI (her coin için 90 → 60 → 30 → 15 → 7 → 3 gün sırasıyla denenir,
+# ilk eşleşmede durulur):
 #
-#   [BÜYÜK RALLİ]  ≥%30 yükseliş
-#        │
-#        ▼
-#   ──[ZİRVE]──────────────────────────────────────────────
-#        │  Fibo 0.618–0.786 bölgesine düşüş
-#        ▼
-#   ──[DİP 1]──  RSI₁ kaydedilir
-#        │  Toparlanma (en az %5)
-#        ▼
-#   ──[TEPE]────
-#        │  Tekrar düşüş
-#        ▼
-#   ──[DİP 2]──  Fiyat ≤ Dip1  AMMA  RSI₂ > RSI₁
-#        │
-#        └─► POZİTİF UYUMSUZLUK ✅ + FİBO BÖLGE TEYIDI ✅
+#   Pencere içindeki en yüksek ve en düşük fiyat bulunur.
+#   A = kronolojik olarak ilk oluşan uç (dip ya da zirve)
+#   B = kronolojik olarak sonra oluşan uç
+#
+#   A dip, B zirve  → yükseliş bacağı  (Fibo seviyeleri B'den aşağı yönde)
+#   A zirve, B dip  → düşüş bacağı    (Fibo seviyeleri B'den yukarı yönde)
+#
+#   Fibo 0.618  : A-B'nin %61.8 geri çekilme seviyesi
+#   Fibo 1.272  : A-B mesafesinin B'den ters yönde %127.2 uzantısı (ABC)
+#
+#   SİNYAL: Güncel fiyat HEM 0.618 HEM 1.272 seviyesine ±%5 tolerans
+#           içinde olmalı (nadir ama güçlü bir sinyal) + RSI teyidi.
 #
 # Bağımlılıklar için requirements.txt dosyasına bakın.
 # Çalıştırma:
@@ -111,28 +108,34 @@ START_DATE_MS    = int(datetime(2026, 4, 1, tzinfo=timezone.utc).timestamp() * 1
 TIMEFRAME        = "4h"
 CANDLES_PER_REQ  = 300
 
-# ── BÜYÜK RALLİ PARAMETRELERİ ────────────────────────────────────────
-MIN_RALLY_PCT    = 0.30    # Ralli büyüklüğü: en az %30 yükseliş
-MIN_RALLY_CANDLES = 5      # Ralli süresi: en az 5 mum (= 20 saat)
 
-# ── FİBONACCİ DÜZELTİ BÖLGE ─────────────────────────────────────────
-# Zirveden dipten gelen yükselişin %61.8 – %78.6 geri çekilme bölgesi
-FIB_LOWER        = 0.618   # Bölge alt sınırı
-FIB_UPPER        = 0.786   # Bölge üst sınırı
-FIB_TOLERANCE    = 0.03    # Her iki sınıra ±%3 esneklik
-#   → Fiili arama bölgesi: 0.618×(1-0.03) = 0.5995 … 0.786×(1+0.03) = 0.8096
+def timeframe_to_candles_per_day(timeframe):
+    """'4h', '1h', '15m' gibi ccxt zaman dilimi string'ini günlük mum sayısına çevirir."""
+    unit  = timeframe[-1]
+    value = int(timeframe[:-1])
+    if unit == "h":
+        return max(1, round(24 / value))
+    if unit == "m":
+        return max(1, round((24 * 60) / value))
+    if unit == "d":
+        return max(1, round(1 / value))
+    raise ValueError(f"Desteklenmeyen zaman dilimi: {timeframe}")
 
-# ── İKİLİ DİP PARAMETRELERİ ──────────────────────────────────────────
-MIN_BOUNCE_PCT   = 0.04    # Dip1 → Tepe arası min toparlanma (%4)
-MAX_DIP2_ABOVE   = 0.03    # Dip2, Dip1'den en fazla %3 yüksekte olabilir
-                            # (Dip2 ≤ Dip1 × 1.03)
-MIN_RSI_DIVERGE  = 1.5     # RSI uyumsuzluğu: RSI₂ − RSI₁ ≥ 1.5 puan
+
+CANDLES_PER_DAY = timeframe_to_candles_per_day(TIMEFRAME)
+
+# ── ZAMAN ARALIĞI ÖNCELİKLENDİRME ────────────────────────────────────
+# Uzun aralıktan kısaya doğru denenir; ilk eşleşme bulunan aralıkta durulur.
+TIME_WINDOWS_DAYS = [90, 60, 30, 15, 7, 3]
+
+# ── FİBONACCİ SEVİYELERİ (A-B GERİ ÇEKİLME / ABC UZANTISI) ───────────
+FIB_RETRACEMENT  = 0.618   # A-B hareketinin %61.8 geri çekilme seviyesi
+FIB_EXTENSION    = 1.272   # A-B mesafesinin B'den ters yönde %127.2 uzantısı
+SIGNAL_TOLERANCE = 0.05    # Güncel fiyat her iki seviyeye de ±%5 yakın olmalı
 
 # ── RSI ──────────────────────────────────────────────────────────────
 RSI_PERIOD       = 14
-
-# ── PENCERE ──────────────────────────────────────────────────────────
-LOOKBACK_CANDLES = 300     # Kaç mum geriye bakılacak
+MIN_RSI_DIVERGE  = 1.5     # A noktası ile güncel RSI arasındaki minimum diverjans (puan)
 
 # ── DİĞER ────────────────────────────────────────────────────────────
 PAUSE_SEC        = 0.22
@@ -140,10 +143,11 @@ EXPORT_CSV       = True
 
 
 def log_settings():
-    log_status("✅  Ayarlar yüklendi — İkili Dip + RSI Diverjans Tarayıcı v1.1")
-    log_status(f"   Zaman Dilimi    : {TIMEFRAME}")
-    log_status(f"   Min Ralli       : %{MIN_RALLY_PCT*100:.0f}")
-    log_status(f"   Fibo Bölge      : {FIB_LOWER:.3f} – {FIB_UPPER:.3f}  (±%{FIB_TOLERANCE*100:.0f} tolerans)")
+    log_status("✅  Ayarlar yüklendi — A-B Fibonacci + ABC Uzantısı Tarayıcı v2.0")
+    log_status(f"   Zaman Dilimi     : {TIMEFRAME}")
+    log_status(f"   Zaman Aralıkları : {', '.join(str(d) + 'g' for d in TIME_WINDOWS_DAYS)} (önce uzun, sonra kısa)")
+    log_status(f"   Fibo Seviyeleri  : {FIB_RETRACEMENT} (geri çekilme) / {FIB_EXTENSION} (ABC uzantısı)")
+    log_status(f"   Sinyal Toleransı : ±%{SIGNAL_TOLERANCE*100:.0f}")
     log_status(f"   Min RSI Diverjans: {MIN_RSI_DIVERGE} puan")
 
 
@@ -204,198 +208,136 @@ def fetch_ohlcv_paginated(exchange, symbol, timeframe, since_ms, pause=0.22):
     return df
 
 
-def find_double_bottom_divergence(df, lookback):
+def find_ab_fibonacci_signal(df, verbose=False):
     """
     ══════════════════════════════════════════════════════════════
-    ANA ALGORİTMA — 5 Adım
+    ANA ALGORİTMA — A-B Fibonacci Geri Çekilme + ABC Uzantısı
 
-    ADIM 1 — BÜYÜK RALLİ TESPİTİ
-      Pencere içinde en güçlü dip→zirve hareketi bulunur.
-      Şart: Yükseliş ≥ %30, süre ≥ 5 mum
+    Zaman aralıkları öncelik sırasıyla denenir: 90 → 60 → 30 → 15 → 7 → 3
+    gün. İlk eşleşme bulunan aralıkta durulur, daha kısa aralıklara
+    geçilmez.
 
-    ADIM 2 — FİBONACCİ DÜZELTİ BÖLGESİ
-      Ralli zirvesinden hesaplanan 0.618–0.786 geri çekilme bölgesi.
-      Dip1 bu bölgede mi?
+    Her aralıkta:
+      A = dönemin kronolojik olarak ilk oluşan ucu (en yüksek ya da en düşük)
+      B = dönemin kronolojik olarak sonra oluşan ucu
 
-    ADIM 3 — DİP 1 TESPİTİ
-      Zirveden sonra oluşan ilk anlamlı düşük (lokal minimum).
+      A dip, B zirve  → yükseliş bacağı (Fibo seviyeleri B'den aşağı yönde)
+      A zirve, B dip  → düşüş bacağı   (Fibo seviyeleri B'den yukarı yönde)
 
-    ADIM 4 — TEPE (ARA TOPARLANMA)
-      Dip1'den sonra en az %MIN_BOUNCE_PCT yükselen ilk tepe.
+      Fibo 0.618  : B - 0.618×|B-A|  (yükselişte) / B + 0.618×|B-A|  (düşüşte)
+      Fibo 1.272  : B - 1.272×|B-A|  (yükselişte) / B + 1.272×|B-A|  (düşüşte)
+        (A-B'nin ters yönünde, B'den itibaren projekte edilir → ABC uzantısı)
 
-    ADIM 5 — DİP 2 + RSI POZİTİF UYUMSUZLUĞU
-      • Dip2 fiyatı ≤ Dip1 × (1 + MAX_DIP2_ABOVE)   [fiyat teyidi]
-      • RSI_dip2 > RSI_dip1 + MIN_RSI_DIVERGE        [diverjans teyidi]
-      • Dip2, Fibo bölgesinde veya çok yakınında      [bölge teyidi]
+    SİNYAL ŞARTI:
+      Güncel fiyat HEM 0.618 HEM 1.272 seviyesine ±SIGNAL_TOLERANCE
+      içinde olmalı (iki koşul birlikte).
+
+    RSI TEYİDİ:
+      Yükseliş bacağında (A dip)  : RSI(güncel) − RSI(A) ≥ MIN_RSI_DIVERGE
+      Düşüş bacağında   (A zirve) : RSI(A) − RSI(güncel) ≥ MIN_RSI_DIVERGE
     ══════════════════════════════════════════════════════════════
     """
-    if len(df) < lookback + 5:
+    close = df["close"]
+    rsi   = compute_rsi(close, RSI_PERIOD)
+
+    current_price = close.iloc[-1]
+    current_rsi   = rsi.iloc[-1]
+
+    if pd.isna(current_rsi):
         return None
 
-    close  = df["close"]
-    high   = df["high"]
-    low    = df["low"]
-    rsi    = compute_rsi(close, RSI_PERIOD)
+    for window_days in TIME_WINDOWS_DAYS:
+        window_candles = window_days * CANDLES_PER_DAY
 
-    window     = df.iloc[-lookback:]
-    win_close  = window["close"]
-    win_high   = window["high"]
-    win_low    = window["low"]
-    win_rsi    = rsi.iloc[-lookback:]
-
-    n = len(window)
-
-    # ── ADIM 1: BÜYÜK RALLİ ──────────────────────────────────────────
-    # Pencere içinde en büyük dip→zirve kombinasyonunu bul.
-    # Yöntem: her olası dip pozisyonu için, sonrasındaki zirveyi kontrol et.
-
-    best_rally = None   # (dip_pos, peak_pos, dip_price, peak_price, rally_pct)
-
-    # Arama alanı: pencerenin ilk %70'i (sonrasında düzeltme + ikili dip için yer kalsın)
-    search_limit = int(n * 0.70)
-
-    for dip_pos in range(0, search_limit - MIN_RALLY_CANDLES):
-        d_price = win_low.iloc[dip_pos]
-
-        # Bu dipten sonraki en yüksek zirveyi bul
-        future   = win_high.iloc[dip_pos + MIN_RALLY_CANDLES : search_limit + MIN_RALLY_CANDLES]
-        if len(future) == 0:
+        if len(df) < window_candles:
+            if verbose:
+                log_status(f"   [{window_days}g] atlandı → yetersiz veri ({len(df)} < {window_candles} mum)")
             continue
 
-        peak_rel = future.idxmax()
-        p_price  = future[peak_rel]
-        peak_pos = window.index.get_loc(peak_rel)
+        window = df.iloc[-window_candles:]
 
-        rally_pct = (p_price - d_price) / d_price
-        if rally_pct < MIN_RALLY_PCT:
+        high_time = window["high"].idxmax()
+        low_time  = window["low"].idxmin()
+
+        if high_time == low_time:
+            if verbose:
+                log_status(f"   [{window_days}g] atlandı → zirve ve dip aynı mumda (dejenere)")
             continue
 
-        # En büyük ralliyi seç
-        if best_rally is None or rally_pct > best_rally[4]:
-            best_rally = (dip_pos, peak_pos, d_price, p_price, rally_pct)
+        high_price = window["high"][high_time]
+        low_price  = window["low"][low_time]
 
-    if best_rally is None:
-        return None
+        if low_time < high_time:
+            a_time, a_price, a_type = low_time, low_price, "dip"
+            b_time, b_price, b_type = high_time, high_price, "zirve"
+        else:
+            a_time, a_price, a_type = high_time, high_price, "zirve"
+            b_time, b_price, b_type = low_time, low_price, "dip"
 
-    rally_dip_pos, rally_peak_pos, rally_dip_price, rally_peak_price, rally_pct = best_rally
-    rally_range = rally_peak_price - rally_dip_price
+        distance = abs(b_price - a_price)
+        if distance <= 0:
+            continue
 
-    # ── ADIM 2: FİBONACCİ DÜZELTİ BÖLGESİ ──────────────────────────
-    # 0.618 geri çekilme = zirve - 0.618 × ralli_aralığı
-    # 0.786 geri çekilme = zirve - 0.786 × ralli_aralığı
-    fib618_price = rally_peak_price - FIB_LOWER * rally_range
-    fib786_price = rally_peak_price - FIB_UPPER * rally_range
+        if a_type == "dip":   # Yükseliş bacağı (A dip → B zirve)
+            fib618_price  = b_price - FIB_RETRACEMENT * distance
+            ext1272_price = b_price - FIB_EXTENSION * distance
+        else:                 # Düşüş bacağı (A zirve → B dip)
+            fib618_price  = b_price + FIB_RETRACEMENT * distance
+            ext1272_price = b_price + FIB_EXTENSION * distance
 
-    # Bölge sınırları (tolerans dahil)
-    zone_upper = fib618_price * (1 + FIB_TOLERANCE)   # 0.618'in biraz üstü
-    zone_lower = fib786_price * (1 - FIB_TOLERANCE)   # 0.786'nın biraz altı
+        if fib618_price <= 0 or ext1272_price <= 0:
+            continue
 
-    # ── ADIM 3: DİP 1 ────────────────────────────────────────────────
-    # Ralli zirvesinden sonra oluşan ilk düşük nokta
-    post_peak = window.iloc[rally_peak_pos + 1:]
-    if len(post_peak) < 6:
-        return None
+        dist_fib618_pct  = abs(current_price - fib618_price) / fib618_price
+        dist_ext1272_pct = abs(current_price - ext1272_price) / ext1272_price
 
-    # İlk anlamlı dip: zirve sonrası en düşük Low (pencerenin geri kalanının ilk %60'ında)
-    dip1_search_end = max(3, int(len(post_peak) * 0.60))
-    dip1_idx   = post_peak["low"].iloc[:dip1_search_end].idxmin()
-    dip1_pos   = post_peak.index.get_loc(dip1_idx)   # post_peak içi pozisyon
-    dip1_price = post_peak["low"][dip1_idx]
-    dip1_rsi   = win_rsi[dip1_idx]
+        if verbose:
+            log_status(
+                f"   [{window_days}g] A={a_type}@{a_price:.6f} B={b_type}@{b_price:.6f} | "
+                f"Fib618={fib618_price:.6f} (Δ%{dist_fib618_pct*100:.2f}) | "
+                f"Ext1272={ext1272_price:.6f} (Δ%{dist_ext1272_pct*100:.2f})"
+            )
 
-    # Dip1 fiyatı, ralli zirvesinin altında olmalı
-    if dip1_price >= rally_peak_price:
-        return None
+        if dist_fib618_pct > SIGNAL_TOLERANCE or dist_ext1272_pct > SIGNAL_TOLERANCE:
+            continue   # Bu aralıkta eşleşme yok → bir sonraki (daha kısa) aralığı dene
 
-    # Dip1 fibo bölgede mi? (ana şart)
-    if not (zone_lower <= dip1_price <= zone_upper):
-        return None
+        a_rsi = rsi.loc[a_time]
+        if pd.isna(a_rsi):
+            if verbose:
+                log_status(f"   [{window_days}g] atlandı → A noktasında RSI henüz hesaplanamıyor (ısınma dönemi)")
+            continue
 
-    # ── ADIM 4: ARA TEPE (BOUNCE) ────────────────────────────────────
-    # Dip1'den sonra en az %MIN_BOUNCE_PCT toparlanma
-    post_dip1 = post_peak.iloc[dip1_pos + 1:]
-    if len(post_dip1) < 3:
-        return None
+        if a_type == "dip":
+            rsi_divergence = current_rsi - a_rsi
+        else:
+            rsi_divergence = a_rsi - current_rsi
 
-    bounce_idx   = post_dip1["high"].idxmax()
-    bounce_price = post_dip1["high"][bounce_idx]
-    bounce_pos   = post_dip1.index.get_loc(bounce_idx)
+        if rsi_divergence < MIN_RSI_DIVERGE:
+            if verbose:
+                log_status(f"   [{window_days}g] atlandı → RSI teyidi yetersiz (diverjans={rsi_divergence:.2f} < {MIN_RSI_DIVERGE})")
+            continue   # RSI teyidi sağlanmadı → bu aralıkta sinyal yok
 
-    bounce_pct = (bounce_price - dip1_price) / dip1_price
-    if bounce_pct < MIN_BOUNCE_PCT:
-        return None   # Toparlanma çok zayıf → gerçek ikili dip yapısı yok
+        return {
+            "window_days"        : window_days,
+            "direction"          : "yukselis_sonrasi_duzeltme" if a_type == "dip" else "dusus_sonrasi_tepki",
+            "a_type"             : a_type,
+            "a_price"            : round(float(a_price), 6),
+            "a_time"             : a_time.isoformat(),
+            "b_type"             : b_type,
+            "b_price"            : round(float(b_price), 6),
+            "b_time"             : b_time.isoformat(),
+            "fib618_price"       : round(float(fib618_price), 6),
+            "ext1272_price"      : round(float(ext1272_price), 6),
+            "current_price"      : round(float(current_price), 6),
+            "dist_to_fib618_pct" : round(float(dist_fib618_pct) * 100, 3),
+            "dist_to_ext1272_pct": round(float(dist_ext1272_pct) * 100, 3),
+            "a_rsi"              : round(float(a_rsi), 2),
+            "current_rsi"        : round(float(current_rsi), 2),
+            "rsi_divergence"     : round(float(rsi_divergence), 2),
+            "candle_total"       : len(df),
+        }
 
-    # ── ADIM 5: DİP 2 + RSI POZİTİF UYUMSUZLUĞU ─────────────────────
-    # Bounce'dan sonra oluşan düşük nokta
-    post_bounce = post_dip1.iloc[bounce_pos + 1:]
-    if len(post_bounce) < 2:
-        return None
-
-    dip2_idx   = post_bounce["low"].idxmin()
-    dip2_price = post_bounce["low"][dip2_idx]
-    dip2_rsi   = win_rsi[dip2_idx]
-
-    # Dip2 fiyat kontrolü: Dip1'den çok yüksekte olmamalı
-    if dip2_price > dip1_price * (1 + MAX_DIP2_ABOVE):
-        return None   # Dip2 çok yüksek → ikili dip yapısı değil
-
-    # Dip2 fiyatı da fibo bölgede veya çok yakınında olmalı (±%5 genişletilmiş)
-    zone_lower_ext = fib786_price * (1 - FIB_TOLERANCE - 0.02)
-    zone_upper_ext = fib618_price * (1 + FIB_TOLERANCE + 0.02)
-    if not (zone_lower_ext <= dip2_price <= zone_upper_ext):
-        return None
-
-    # RSI POZİTİF UYUMSUZLUK: Fiyat ≤ dip1 ama RSI > dip1_rsi
-    rsi_divergence = dip2_rsi - dip1_rsi
-    if rsi_divergence < MIN_RSI_DIVERGE:
-        return None   # Diverjans yok veya negatif
-
-    # ── ÇIKIŞ DEĞERLERİ ──────────────────────────────────────────────
-    # Mevcut fiyat
-    current_price   = close.iloc[-1]
-    current_rsi     = rsi.iloc[-1]
-
-    # Dip2'nin fibo bölgedeki konumu (0.618 mi 0.786 mı?)
-    dip2_fib_level  = (rally_peak_price - dip2_price) / rally_range
-
-    # Hedef: Ralli zirvesinin %50–%61.8 geri alımı (olası çıkış hedefi)
-    target_50  = dip2_price + 0.500 * (rally_peak_price - dip2_price)
-    target_618 = dip2_price + 0.618 * (rally_peak_price - dip2_price)
-
-    # Risk/Reward (stop = Dip2'nin %2 altı)
-    stop_loss   = dip2_price * 0.98
-    risk        = dip2_price - stop_loss
-    reward_50   = target_50 - current_price
-    rr_ratio    = round(reward_50 / risk, 2) if risk > 0 else 0
-
-    return {
-        # Ralli
-        "rally_dip"       : round(rally_dip_price, 6),
-        "rally_peak"      : round(rally_peak_price, 6),
-        "rally_pct"       : round(rally_pct * 100, 1),
-        # Fibo bölge
-        "fib618_price"    : round(fib618_price, 6),
-        "fib786_price"    : round(fib786_price, 6),
-        # İkili Dip
-        "dip1_price"      : round(dip1_price, 6),
-        "dip1_rsi"        : round(dip1_rsi, 2),
-        "bounce_price"    : round(bounce_price, 6),
-        "bounce_pct"      : round(bounce_pct * 100, 1),
-        "dip2_price"      : round(dip2_price, 6),
-        "dip2_rsi"        : round(dip2_rsi, 2),
-        "dip2_fib_level"  : round(dip2_fib_level, 3),
-        # RSI Diverjans
-        "rsi_divergence"  : round(rsi_divergence, 2),
-        # Mevcut durum
-        "current_price"   : round(current_price, 6),
-        "current_rsi"     : round(current_rsi, 2),
-        # Hedefler
-        "target_50pct"    : round(target_50, 6),
-        "target_618pct"   : round(target_618, 6),
-        "stop_loss"       : round(stop_loss, 6),
-        "rr_ratio"        : rr_ratio,
-        "candle_total"    : len(df),
-    }
+    return None
 
 
 def _json_default(obj):
@@ -417,12 +359,10 @@ def write_signal_outputs(results, skipped_data, skipped_crit, total_scanned):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "timeframe": TIMEFRAME,
         "parameters": {
-            "min_rally_pct": MIN_RALLY_PCT,
-            "fib_lower": FIB_LOWER,
-            "fib_upper": FIB_UPPER,
-            "fib_tolerance": FIB_TOLERANCE,
-            "min_bounce_pct": MIN_BOUNCE_PCT,
-            "max_dip2_above": MAX_DIP2_ABOVE,
+            "time_windows_days": TIME_WINDOWS_DAYS,
+            "fib_retracement": FIB_RETRACEMENT,
+            "fib_extension": FIB_EXTENSION,
+            "signal_tolerance_pct": SIGNAL_TOLERANCE * 100,
             "min_rsi_diverge": MIN_RSI_DIVERGE,
             "rsi_period": RSI_PERIOD,
         },
@@ -441,12 +381,12 @@ def write_signal_outputs(results, skipped_data, skipped_crit, total_scanned):
     for result in results:
         log_signal(
             f"✅  {result['symbol']:<16} | "
-            f"Ralli=%{result['rally_pct']:.0f} | "
-            f"Dip1={result['dip1_price']} RSI={result['dip1_rsi']:.1f} | "
-            f"Dip2={result['dip2_price']} RSI={result['dip2_rsi']:.1f} | "
-            f"Diverjans=+{result['rsi_divergence']:.1f} | "
-            f"Fib={result['dip2_fib_level']:.3f} | "
-            f"R/R={result['rr_ratio']}"
+            f"Pencere={result['window_days']}g | "
+            f"A({result['a_type']})={result['a_price']} | "
+            f"B({result['b_type']})={result['b_price']} | "
+            f"Fib618={result['fib618_price']} (Δ%{result['dist_to_fib618_pct']:.2f}) | "
+            f"Ext1272={result['ext1272_price']} (Δ%{result['dist_to_ext1272_pct']:.2f}) | "
+            f"RSI Diverjans=+{result['rsi_divergence']:.2f}"
         )
 
     log_status(f"💾  Sinyaller → {SIGNALS_JSON}")
@@ -491,8 +431,7 @@ def run_scanner():
             time.sleep(PAUSE_SEC)
             continue
 
-        lookback = min(LOOKBACK_CANDLES, len(df) - 3)
-        result   = find_double_bottom_divergence(df, lookback)
+        result = find_ab_fibonacci_signal(df)
 
         if result is None:
             skipped_crit += 1
@@ -514,32 +453,29 @@ def run_scanner():
 
     if not results:
         log_status("\n❌  Hiç aday bulunamadı.")
-        log_status("   İpucu → MIN_RALLY_PCT=0.25, MIN_RSI_DIVERGE=1.0 dene.")
+        log_status("   İpucu → SIGNAL_TOLERANCE=0.07, MIN_RSI_DIVERGE=1.0 dene.")
         return None
 
     # ── DataFrame ────────────────────────────────────────────────────
     col_map = {
-        "symbol"         : "Sembol",
-        "current_price"  : "Mevcut Fiyat",
-        "current_rsi"    : "RSI (Şimdi)",
-        "rsi_divergence" : "RSI Diverjans (+puan)",
-        "dip2_fib_level" : "Dip2 Fibo Seviyesi",
-        "dip1_price"     : "Dip 1 Fiyatı",
-        "dip1_rsi"       : "Dip 1 RSI",
-        "bounce_price"   : "Ara Tepe",
-        "bounce_pct"     : "Bounce%",
-        "dip2_price"     : "Dip 2 Fiyatı",
-        "dip2_rsi"       : "Dip 2 RSI",
-        "fib618_price"   : "Fibo 0.618",
-        "fib786_price"   : "Fibo 0.786",
-        "rally_pct"      : "Ralli Büyüklük%",
-        "rally_dip"      : "Ralli Başlangıç",
-        "rally_peak"     : "Ralli Zirvesi",
-        "target_50pct"   : "Hedef %50 Geri Alım",
-        "target_618pct"  : "Hedef %61.8 Geri Alım",
-        "stop_loss"      : "Stop Loss (Dip2-%2)",
-        "rr_ratio"        : "R/R Oranı",
-        "candle_total"   : "Toplam Mum",
+        "symbol"              : "Sembol",
+        "window_days"         : "Zaman Aralığı (gün)",
+        "direction"           : "Yön",
+        "a_type"              : "A Tipi",
+        "a_price"             : "A Fiyatı",
+        "a_time"              : "A Zamanı",
+        "b_type"              : "B Tipi",
+        "b_price"             : "B Fiyatı",
+        "b_time"              : "B Zamanı",
+        "fib618_price"        : "Fibo 0.618",
+        "ext1272_price"       : "Fibo 1.272 (ABC)",
+        "current_price"       : "Güncel Fiyat",
+        "dist_to_fib618_pct"  : "0.618'e Uzaklık%",
+        "dist_to_ext1272_pct" : "1.272'ye Uzaklık%",
+        "a_rsi"               : "A RSI",
+        "current_rsi"         : "Güncel RSI",
+        "rsi_divergence"      : "RSI Diverjans",
+        "candle_total"        : "Toplam Mum",
     }
 
     df_out = pd.DataFrame(results)
@@ -547,11 +483,11 @@ def run_scanner():
     df_out = df_out.rename(columns=col_map)
 
     # RSI diverjansına göre sırala (en güçlü diverjans önce)
-    df_out = df_out.sort_values("RSI Diverjans (+puan)", ascending=False)
+    df_out = df_out.sort_values("RSI Diverjans", ascending=False)
     df_out = df_out.reset_index(drop=True)
 
     log_status(f"\n{'═'*65}")
-    log_status(f"  🎯  {len(df_out)} adet 'İkili Dip + RSI Diverjans' adayı! (detaylar {SIGNALS_JSON} / {LOG_FILE} dosyalarında)\n")
+    log_status(f"  🎯  {len(df_out)} adet 'A-B Fibonacci + ABC Uzantısı' adayı! (detaylar {SIGNALS_JSON} / {LOG_FILE} dosyalarında)\n")
 
     if EXPORT_CSV:
         fn = "okx_double_bottom_divergence.csv"
@@ -564,8 +500,8 @@ def run_scanner():
 # ─── TEK COİN DETAYLI TEST ───────────────────────────────────────────
 def debug_test_symbol(test_symbol, debug=True):
     """
-    Belirli bir coini test eder. Hangi adımda elendiğini görmek için
-    debug=True kullanılabilir. Otomatik taramanın bir parçası değildir;
+    Belirli bir coini test eder. Hangi pencerede/adımda elendiğini görmek
+    için debug=True kullanılabilir. Otomatik taramanın bir parçası değildir;
     yalnızca --test-symbol ile açıkça istendiğinde çalışır.
     """
     ex = build_exchange()
@@ -584,30 +520,9 @@ def debug_test_symbol(test_symbol, debug=True):
     log_status(f"   Fiyat aralığı: {df_t['low'].min():.6f} – {df_t['high'].max():.6f}")
 
     if debug:
-        # Her adımı manuel çalıştır
-        window = df_t.iloc[-min(LOOKBACK_CANDLES, len(df_t)-3):]
+        log_status("\n── DEBUG: Zaman Aralığı Taraması ──")
 
-        # En büyük ralliyi bul ve göster
-        log_status("\n── DEBUG: Ralli Taraması ──")
-        n = len(window)
-        best = None
-        for dp in range(0, int(n*0.70) - MIN_RALLY_CANDLES):
-            d_p = window["low"].iloc[dp]
-            fut = window["high"].iloc[dp + MIN_RALLY_CANDLES : int(n*0.70)+MIN_RALLY_CANDLES]
-            if len(fut) == 0: continue
-            pp  = fut.max()
-            rp  = (pp - d_p) / d_p
-            if best is None or rp > best[2]:
-                best = (d_p, pp, rp)
-        if best:
-            log_status(f"   En büyük ralli : {best[2]*100:.1f}%  ({best[0]:.6f} → {best[1]:.6f})")
-            rng = best[1] - best[0]
-            log_status(f"   Fibo 0.618     : {best[1] - 0.618*rng:.6f}")
-            log_status(f"   Fibo 0.786     : {best[1] - 0.786*rng:.6f}")
-        else:
-            log_status("   Ralli bulunamadı")
-
-    result_t = find_double_bottom_divergence(df_t, min(LOOKBACK_CANDLES, len(df_t)-3))
+    result_t = find_ab_fibonacci_signal(df_t, verbose=debug)
 
     if result_t:
         log_status("\n   ✅  ADAY — Tüm kriterler karşılandı!")
@@ -616,12 +531,12 @@ def debug_test_symbol(test_symbol, debug=True):
     else:
         log_status("\n   ❌  Kriterler karşılanmıyor.")
         if debug:
-            log_status("   → MIN_RALLY_PCT veya MIN_RSI_DIVERGE değerlerini gevşetmeyi dene.")
+            log_status("   → SIGNAL_TOLERANCE veya MIN_RSI_DIVERGE değerlerini gevşetmeyi dene.")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="OKX Büyük Ralli Sonrası Fibo Bölgesinde İkili Dip + RSI Pozitif Uyumsuzluğu Tarayıcı"
+        description="OKX A-B Fibonacci Geri Çekilme + ABC Uzantısı Tarayıcı"
     )
     parser.add_argument(
         "--test-symbol",
