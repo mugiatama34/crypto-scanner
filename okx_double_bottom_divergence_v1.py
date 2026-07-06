@@ -44,6 +44,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from signal_validation import evaluate_signal
+
 warnings.filterwarnings("ignore")
 
 # ── LOGLAMA ────────────────────────────────────────────────────────────
@@ -353,7 +355,22 @@ def _json_default(obj):
     raise TypeError(f"'{type(obj)}' JSON'a çevrilemiyor")
 
 
-def write_signal_outputs(results, skipped_data, skipped_crit, total_scanned):
+def validation_result_to_dict(symbol, validation):
+    """signal_validation.SignalResult'ı JSON'a yazılabilir bir sözlüğe çevirir."""
+    return {
+        "symbol": symbol,
+        "confidence": validation.confidence,
+        "reasons": validation.reasons,
+        "stop_price": round(float(validation.stop_price), 6) if validation.stop_price is not None else None,
+        "position_size": round(float(validation.position_size), 6) if validation.position_size is not None else None,
+        "fib_zone": (
+            [round(float(validation.fib_zone[0]), 6), round(float(validation.fib_zone[1]), 6)]
+            if validation.fib_zone is not None else None
+        ),
+    }
+
+
+def write_signal_outputs(results, validation_results, skipped_data, skipped_crit, total_scanned):
     """Bulunan sinyalleri konsol yerine signals.json / signals.log dosyalarına yazar."""
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -371,8 +388,10 @@ def write_signal_outputs(results, skipped_data, skipped_crit, total_scanned):
             "skipped_no_data": skipped_data,
             "skipped_criteria_not_met": skipped_crit,
             "matched": len(results),
+            "matched_double_bottom_validation": len(validation_results),
         },
         "signals": results,
+        "double_bottom_validation_signals": validation_results,
     }
 
     with open(SIGNALS_JSON, "w", encoding="utf-8") as f:
@@ -387,6 +406,14 @@ def write_signal_outputs(results, skipped_data, skipped_crit, total_scanned):
             f"Fib618={result['fib618_price']} (Δ%{result['dist_to_fib618_pct']:.2f}) | "
             f"Ext1272={result['ext1272_price']} (Δ%{result['dist_to_ext1272_pct']:.2f}) | "
             f"RSI Diverjans=+{result['rsi_divergence']:.2f}"
+        )
+
+    for v in validation_results:
+        log_signal(
+            f"✅  [Double Bottom Validation] {v['symbol']:<16} | "
+            f"confidence={v['confidence']} | "
+            f"stop={v['stop_price']} | pos_size={v['position_size']} | "
+            f"reasons={v['reasons']}"
         )
 
     log_status(f"💾  Sinyaller → {SIGNALS_JSON}")
@@ -414,12 +441,14 @@ def run_scanner():
     log_status(f"📊  {total} aktif USDT Spot çifti")
     log_status(f"⏳  Tahmini süre: ~{total * PAUSE_SEC / 60:.0f} dakika\n")
 
-    results      = []
-    skipped_data = 0
-    skipped_crit = 0
+    results            = []
+    validation_results = []
+    skipped_data       = 0
+    skipped_crit       = 0
 
     for symbol in tqdm(usdt_pairs, desc="🔍 Taranıyor", unit="coin"):
 
+        # DataFrame (OHLCV) burada üretilir.
         df = fetch_ohlcv_paginated(
             exchange, symbol, TIMEFRAME,
             since_ms=START_DATE_MS,
@@ -432,6 +461,22 @@ def run_scanner():
             continue
 
         result = find_ab_fibonacci_signal(df)
+
+        # signal_validation.evaluate_signal() doğrulama katmanı: A-B tespiti
+        # bir sinyal bulduysa, onun swing_high/swing_low'unu kullanır (son 60
+        # bar max/min varsayılanından daha güvenilir); bulamadıysa
+        # evaluate_signal kendi varsayılanına düşer.
+        swing_high = swing_low = None
+        if result is not None:
+            swing_high = max(result["a_price"], result["b_price"])
+            swing_low  = min(result["a_price"], result["b_price"])
+
+        validation = evaluate_signal(df, swing_high=swing_high, swing_low=swing_low)
+
+        if validation.is_valid:
+            validation_results.append(validation_result_to_dict(symbol, validation))
+        else:
+            log_signal(f"ℹ️  [Double Bottom Validation] {symbol:<16} reddedildi | reasons={validation.reasons}")
 
         if result is None:
             skipped_crit += 1
@@ -447,9 +492,10 @@ def run_scanner():
     log_status(f"\n{'─'*65}")
     log_status(f"  Veri yetersiz  : {skipped_data}")
     log_status(f"  Kriter tutmadı : {skipped_crit}")
-    log_status(f"  ✅  Eşleşen    : {len(results)}")
+    log_status(f"  ✅  Eşleşen (A-B Fibonacci)         : {len(results)}")
+    log_status(f"  ✅  Eşleşen (Double Bottom Doğrulama): {len(validation_results)}")
 
-    write_signal_outputs(results, skipped_data, skipped_crit, total)
+    write_signal_outputs(results, validation_results, skipped_data, skipped_crit, total)
 
     if not results:
         log_status("\n❌  Hiç aday bulunamadı.")
