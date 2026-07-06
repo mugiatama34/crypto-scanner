@@ -142,6 +142,21 @@ MIN_RSI_DIVERGE  = 1.5     # A noktası ile güncel RSI arasındaki minimum dive
 # ── DİĞER ────────────────────────────────────────────────────────────
 PAUSE_SEC        = 0.22
 EXPORT_CSV       = True
+MIN_CANDLES      = 40      # En kısa pencere (3g=18 mum) + RSI ısınma dönemi için asgari veri
+
+# ── LİKİDİTE / STABLECOIN FİLTRELERİ ─────────────────────────────────
+MIN_24H_VOLUME_USDT = float(os.environ.get("MIN_24H_VOLUME_USDT", 1_000_000))
+
+STABLECOIN_BASES = {
+    "USDC", "USDG", "USAT", "DAI", "TUSD", "FDUSD", "USDD", "USDP", "PYUSD",
+    "GUSD", "USDK", "LUSD", "SUSD", "USTC", "USDE", "EUR", "EURT",
+}
+
+
+def is_stablecoin_pair(symbol):
+    """'USDC/USDT' gibi iki tarafı da sabit fiyatlı parite mi kontrol eder."""
+    base = symbol.split("/")[0].upper()
+    return base in STABLECOIN_BASES
 
 
 def log_settings():
@@ -237,6 +252,13 @@ def find_ab_fibonacci_signal(df, verbose=False):
     RSI TEYİDİ:
       Yükseliş bacağında (A dip)  : RSI(güncel) − RSI(A) ≥ MIN_RSI_DIVERGE
       Düşüş bacağında   (A zirve) : RSI(A) − RSI(güncel) ≥ MIN_RSI_DIVERGE
+
+    ÖNEMLİ: A/B, pencerenin SON (henüz kapanmamış/en güncel) mumu HARİÇ
+    tutularak aranır. Aksi halde B = güncel mum olabilir; bu durumda
+    "güncel fiyatın B'den hesaplanan hedefe yakınlığı" testi kendi
+    verisiyle kendini doğrulayan anlamsız bir kontrole dönüşür (B zaten
+    güncel mumun high/low'undan türetildiği için current_price'a
+    yapay şekilde yakın çıkar).
     ══════════════════════════════════════════════════════════════
     """
     close = df["close"]
@@ -258,8 +280,15 @@ def find_ab_fibonacci_signal(df, verbose=False):
 
         window = df.iloc[-window_candles:]
 
-        high_time = window["high"].idxmax()
-        low_time  = window["low"].idxmin()
+        # Son mum A/B aramasından hariç tutulur (bkz. yukarıdaki ÖNEMLİ notu).
+        confirmed_window = window.iloc[:-1]
+        if len(confirmed_window) < 2:
+            if verbose:
+                log_status(f"   [{window_days}g] atlandı → teyitli mum sayısı yetersiz")
+            continue
+
+        high_time = confirmed_window["high"].idxmax()
+        low_time  = confirmed_window["low"].idxmin()
 
         if high_time == low_time:
             if verbose:
@@ -355,7 +384,7 @@ def _json_default(obj):
     raise TypeError(f"'{type(obj)}' JSON'a çevrilemiyor")
 
 
-def validation_result_to_dict(symbol, validation):
+def validation_result_to_dict(symbol, validation, volume_24h_usdt=None):
     """signal_validation.SignalResult'ı JSON'a yazılabilir bir sözlüğe çevirir."""
     return {
         "symbol": symbol,
@@ -367,6 +396,7 @@ def validation_result_to_dict(symbol, validation):
             [round(float(validation.fib_zone[0]), 6), round(float(validation.fib_zone[1]), 6)]
             if validation.fib_zone is not None else None
         ),
+        "volume_24h_usdt": round(float(volume_24h_usdt), 2) if volume_24h_usdt is not None else None,
     }
 
 
@@ -435,10 +465,30 @@ def run_scanner():
         and m.get("active", False)
         and "/USDT" in s
         and ":" not in s
+        and not is_stablecoin_pair(s)
     ]
+    log_status(f"📊  {len(usdt_pairs)} aktif USDT Spot çifti (stablecoin hariç)")
+
+    # ── Hacim/likidite filtresi ─────────────────────────────────────
+    log_status(f"📈  24 saatlik hacim filtresi uygulanıyor (≥{MIN_24H_VOLUME_USDT:,.0f} USDT)...")
+    volume_by_symbol = {}
+    try:
+        tickers = exchange.fetch_tickers(usdt_pairs)
+    except Exception as exc:
+        tickers = {}
+        log_status(f"⚠️  Ticker verisi çekilemedi, hacim filtresi atlanıyor ({exc})")
+
+    if tickers:
+        liquid_pairs = []
+        for s in usdt_pairs:
+            vol = (tickers.get(s) or {}).get("quoteVolume")
+            if vol is not None and vol >= MIN_24H_VOLUME_USDT:
+                volume_by_symbol[s] = vol
+                liquid_pairs.append(s)
+        usdt_pairs = liquid_pairs
 
     total = len(usdt_pairs)
-    log_status(f"📊  {total} aktif USDT Spot çifti")
+    log_status(f"📊  {total} likit USDT Spot çifti taranacak")
     log_status(f"⏳  Tahmini süre: ~{total * PAUSE_SEC / 60:.0f} dakika\n")
 
     results            = []
@@ -455,12 +505,13 @@ def run_scanner():
             pause=PAUSE_SEC
         )
 
-        if df is None or len(df) < 25:
+        if df is None or len(df) < MIN_CANDLES:
             skipped_data += 1
             time.sleep(PAUSE_SEC)
             continue
 
         result = find_ab_fibonacci_signal(df)
+        vol_24h = volume_by_symbol.get(symbol)
 
         # signal_validation.evaluate_signal() doğrulama katmanı: A-B tespiti
         # bir sinyal bulduysa, onun swing_high/swing_low'unu kullanır (son 60
@@ -474,7 +525,7 @@ def run_scanner():
         validation = evaluate_signal(df, swing_high=swing_high, swing_low=swing_low)
 
         if validation.is_valid:
-            validation_results.append(validation_result_to_dict(symbol, validation))
+            validation_results.append(validation_result_to_dict(symbol, validation, vol_24h))
         else:
             log_signal(f"ℹ️  [Double Bottom Validation] {symbol:<16} reddedildi | reasons={validation.reasons}")
 
@@ -484,6 +535,7 @@ def run_scanner():
             continue
 
         result["symbol"] = symbol
+        result["volume_24h_usdt"] = round(float(vol_24h), 2) if vol_24h is not None else None
         results.append(result)
 
         time.sleep(PAUSE_SEC)
@@ -497,8 +549,28 @@ def run_scanner():
 
     write_signal_outputs(results, validation_results, skipped_data, skipped_crit, total)
 
+    # Double Bottom doğrulama CSV'si, A-B Fibonacci sonucu olsun ya da
+    # olmasın bağımsız olarak yazılır (iki strateji birbirinden ayrı).
+    if EXPORT_CSV and validation_results:
+        val_col_map = {
+            "symbol"          : "Sembol",
+            "confidence"      : "Güven",
+            "reasons"         : "Nedenler",
+            "stop_price"      : "Stop Fiyatı",
+            "position_size"   : "Pozisyon Büyüklüğü",
+            "fib_zone"        : "Fibo 0.618-0.786 Bandı",
+            "volume_24h_usdt" : "24s Hacim (USDT)",
+        }
+        df_val = pd.DataFrame(validation_results)
+        df_val = df_val[[c for c in val_col_map if c in df_val.columns]]
+        df_val = df_val.rename(columns=val_col_map)
+
+        val_fn = "okx_double_bottom_signals.csv"
+        df_val.to_csv(val_fn, index=False, encoding="utf-8-sig")
+        log_status(f"💾  CSV (Double Bottom)  → {val_fn}")
+
     if not results:
-        log_status("\n❌  Hiç aday bulunamadı.")
+        log_status("\n❌  A-B Fibonacci: Hiç aday bulunamadı.")
         log_status("   İpucu → SIGNAL_TOLERANCE=0.07, MIN_RSI_DIVERGE=1.0 dene.")
         return None
 
@@ -522,6 +594,7 @@ def run_scanner():
         "current_rsi"         : "Güncel RSI",
         "rsi_divergence"      : "RSI Diverjans",
         "candle_total"        : "Toplam Mum",
+        "volume_24h_usdt"     : "24s Hacim (USDT)",
     }
 
     df_out = pd.DataFrame(results)
@@ -536,9 +609,12 @@ def run_scanner():
     log_status(f"  🎯  {len(df_out)} adet 'A-B Fibonacci + ABC Uzantısı' adayı! (detaylar {SIGNALS_JSON} / {LOG_FILE} dosyalarında)\n")
 
     if EXPORT_CSV:
-        fn = "okx_double_bottom_divergence.csv"
+        # Dosya adı stratejiyi yansıtır: bu bir double-bottom taraması DEĞİL,
+        # A-B Fibonacci geri çekilme + ABC uzantısı sinyalleridir. Gerçek
+        # double-bottom sonuçları yukarıda ayrı bir CSV'ye yazıldı.
+        fn = "okx_ab_fibonacci_signals.csv"
         df_out.to_csv(fn, index=False, encoding="utf-8-sig")
-        log_status(f"💾  CSV → {fn}")
+        log_status(f"💾  CSV (A-B Fibonacci) → {fn}")
 
     return df_out
 
