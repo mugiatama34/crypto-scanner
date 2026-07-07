@@ -139,6 +139,15 @@ SIGNAL_TOLERANCE = 0.05    # Güncel fiyat her iki seviyeye de ±%5 yakın olmal
 RSI_PERIOD       = 14
 MIN_RSI_DIVERGE  = 1.5     # A noktası ile güncel RSI arasındaki minimum diverjans (puan)
 
+# ── ZAMAN BAZLI CONFLUENCE PUANLAMASI (opsiyonel — sinyali reddetmez) ──
+# Fibo 0.618/1.272 + RSI teyidi geçen bir sinyal, aşağıdaki iki zaman
+# bazlı kontrolle EK puan alır. Bu kontroller hiçbir zaman bir sinyali
+# reddetmez (gate değil); sadece confidence_score'a katkı sağlar.
+TIME_PROJECTION_RATIOS       = [0.382, 0.618, 1.0, 1.272, 1.618]
+TIME_CONFLUENCE_TOLERANCE_BARS = 2    # 4h'de ±2 mum = ±8 saat
+TIME_SYMMETRY_TOLERANCE       = 0.2   # Geçmiş swing sürelerine göre ±%20
+BASE_CONFIDENCE_SCORE         = 1.0   # Fibo+RSI kapısını geçen her sinyalin taban puanı
+
 # ── DİĞER ────────────────────────────────────────────────────────────
 PAUSE_SEC        = 0.22
 EXPORT_CSV       = True
@@ -166,6 +175,8 @@ def log_settings():
     log_status(f"   Fibo Seviyeleri  : {FIB_RETRACEMENT} (geri çekilme) / {FIB_EXTENSION} (ABC uzantısı)")
     log_status(f"   Sinyal Toleransı : ±%{SIGNAL_TOLERANCE*100:.0f}")
     log_status(f"   Min RSI Diverjans: {MIN_RSI_DIVERGE} puan")
+    log_status(f"   Zaman Confluence : oranlar={TIME_PROJECTION_RATIOS}, tolerans=±{TIME_CONFLUENCE_TOLERANCE_BARS} bar (opsiyonel puan)")
+    log_status(f"   Zaman Simetrisi  : tolerans=±%{TIME_SYMMETRY_TOLERANCE*100:.0f} (opsiyonel puan)")
 
 
 # ─── FONKSİYONLAR ─────────────────────────────────────────────────────
@@ -259,6 +270,19 @@ def find_ab_fibonacci_signal(df, verbose=False):
     verisiyle kendini doğrulayan anlamsız bir kontrole dönüşür (B zaten
     güncel mumun high/low'undan türetildiği için current_price'a
     yapay şekilde yakın çıkar).
+
+    OPSİYONEL ZAMAN CONFLUENCE PUANI (gate değil, sinyali reddetmez):
+      • Zaman projeksiyonu: A-B süresi (bar) × [0.382, 0.618, 1.0, 1.272,
+        1.618] ile olası "dönüş" noktaları projekte edilir; B'den bugüne
+        kadar geçen bar sayısı bu noktalardan birine ±2 bar yakınsa
+        time_confluence=True.
+      • Zaman simetrisi: Bu taramada (aynı sembol için) A-B'den ÖNCE
+        denenmiş daha uzun pencerelerin kendi A-B swing süreleri, "geçmiş
+        düzeltme süreleri" için kaba bir yaklaşım olarak kullanılır (script
+        genel bir çoklu-pivot dedektörü içermediğinden). Güncel swing
+        süresi bunların ortalamasına ±%20 yakınsa symmetry_match=True.
+      • confidence_score = BASE_CONFIDENCE_SCORE + 0.5×time_confluence
+        + 0.5×symmetry_match  (aralık: 1.0 – 2.0)
     ══════════════════════════════════════════════════════════════
     """
     close = df["close"]
@@ -266,9 +290,15 @@ def find_ab_fibonacci_signal(df, verbose=False):
 
     current_price = close.iloc[-1]
     current_rsi   = rsi.iloc[-1]
+    current_pos   = len(df) - 1
 
     if pd.isna(current_rsi):
         return None
+
+    # Bu taramada (cascade sırasında) hesaplanan A-B swing süreleri (bar).
+    # Eşleşme bulunduğunda, o ana kadar denenmiş (daha uzun) pencerelerin
+    # swing süreleri "geçmiş düzeltme süresi" yaklaşımı olarak kullanılır.
+    past_swing_durations = []
 
     for window_days in TIME_WINDOWS_DAYS:
         window_candles = window_days * CANDLES_PER_DAY
@@ -309,6 +339,10 @@ def find_ab_fibonacci_signal(df, verbose=False):
         if distance <= 0:
             continue
 
+        a_pos = df.index.get_loc(a_time)
+        b_pos = df.index.get_loc(b_time)
+        swing_duration_bars = b_pos - a_pos
+
         if a_type == "dip":   # Yükseliş bacağı (A dip → B zirve)
             fib618_price  = b_price - FIB_RETRACEMENT * distance
             ext1272_price = b_price - FIB_EXTENSION * distance
@@ -318,6 +352,12 @@ def find_ab_fibonacci_signal(df, verbose=False):
 
         if fib618_price <= 0 or ext1272_price <= 0:
             continue
+
+        # Bu pencerenin (geçerli) swing süresi, sonraki (daha kısa) bir
+        # pencerede eşleşme bulunursa zaman simetrisi kıyaslaması için
+        # "geçmiş düzeltme süresi" adayı olarak saklanır.
+        if swing_duration_bars > 0:
+            past_swing_durations.append(swing_duration_bars)
 
         dist_fib618_pct  = abs(current_price - fib618_price) / fib618_price
         dist_ext1272_pct = abs(current_price - ext1272_price) / ext1272_price
@@ -348,6 +388,36 @@ def find_ab_fibonacci_signal(df, verbose=False):
                 log_status(f"   [{window_days}g] atlandı → RSI teyidi yetersiz (diverjans={rsi_divergence:.2f} < {MIN_RSI_DIVERGE})")
             continue   # RSI teyidi sağlanmadı → bu aralıkta sinyal yok
 
+        # ── Opsiyonel zaman confluence puanı (gate değil) ─────────────
+        current_bars_since_b = current_pos - b_pos
+
+        projected_turn_bars = [swing_duration_bars * r for r in TIME_PROJECTION_RATIOS]
+        time_confluence = any(
+            abs(current_bars_since_b - p) <= TIME_CONFLUENCE_TOLERANCE_BARS
+            for p in projected_turn_bars
+        )
+
+        # past_swing_durations'ın son elemanı bu swing'in kendisi; simetri
+        # kıyaslaması "geçmiş" (bu taramada daha önce denenmiş daha uzun
+        # pencerelerin) süreleriyle yapılır, kendisiyle değil.
+        past_durations = past_swing_durations[:-1]
+        symmetry_match = False
+        avg_past_duration = None
+        if past_durations:
+            avg_past_duration = sum(past_durations) / len(past_durations)
+            if avg_past_duration > 0:
+                symmetry_match = abs(swing_duration_bars - avg_past_duration) / avg_past_duration < TIME_SYMMETRY_TOLERANCE
+
+        confidence_score = BASE_CONFIDENCE_SCORE + (0.5 if time_confluence else 0) + (0.5 if symmetry_match else 0)
+
+        if verbose:
+            log_status(
+                f"   [{window_days}g] zaman: swing={swing_duration_bars} bar, B'den bugüne={current_bars_since_b} bar, "
+                f"projeksiyon={[round(p,1) for p in projected_turn_bars]} → confluence={time_confluence} | "
+                f"geçmiş ort.={round(avg_past_duration,1) if avg_past_duration is not None else 'yok'} → simetri={symmetry_match} | "
+                f"confidence_score={confidence_score}"
+            )
+
         return {
             "window_days"        : window_days,
             "direction"          : "yukselis_sonrasi_duzeltme" if a_type == "dip" else "dusus_sonrasi_tepki",
@@ -366,6 +436,12 @@ def find_ab_fibonacci_signal(df, verbose=False):
             "current_rsi"        : round(float(current_rsi), 2),
             "rsi_divergence"     : round(float(rsi_divergence), 2),
             "candle_total"       : len(df),
+            "swing_duration_bars"  : int(swing_duration_bars),
+            "current_bars_since_b" : int(current_bars_since_b),
+            "time_confluence"       : bool(time_confluence),
+            "symmetry_match"        : bool(symmetry_match),
+            "past_swing_sample_size": len(past_durations),
+            "confidence_score"      : round(float(confidence_score), 2),
         }
 
     return None
@@ -412,6 +488,10 @@ def write_signal_outputs(results, validation_results, skipped_data, skipped_crit
             "signal_tolerance_pct": SIGNAL_TOLERANCE * 100,
             "min_rsi_diverge": MIN_RSI_DIVERGE,
             "rsi_period": RSI_PERIOD,
+            "time_projection_ratios": TIME_PROJECTION_RATIOS,
+            "time_confluence_tolerance_bars": TIME_CONFLUENCE_TOLERANCE_BARS,
+            "time_symmetry_tolerance_pct": TIME_SYMMETRY_TOLERANCE * 100,
+            "base_confidence_score": BASE_CONFIDENCE_SCORE,
         },
         "summary": {
             "total_scanned": total_scanned,
@@ -435,7 +515,9 @@ def write_signal_outputs(results, validation_results, skipped_data, skipped_crit
             f"B({result['b_type']})={result['b_price']} | "
             f"Fib618={result['fib618_price']} (Δ%{result['dist_to_fib618_pct']:.2f}) | "
             f"Ext1272={result['ext1272_price']} (Δ%{result['dist_to_ext1272_pct']:.2f}) | "
-            f"RSI Diverjans=+{result['rsi_divergence']:.2f}"
+            f"RSI Diverjans=+{result['rsi_divergence']:.2f} | "
+            f"confidence={result['confidence_score']} "
+            f"(time_confluence={result['time_confluence']}, symmetry={result['symmetry_match']})"
         )
 
     for v in validation_results:
@@ -595,14 +677,20 @@ def run_scanner():
         "rsi_divergence"      : "RSI Diverjans",
         "candle_total"        : "Toplam Mum",
         "volume_24h_usdt"     : "24s Hacim (USDT)",
+        "swing_duration_bars" : "Swing Süresi (bar)",
+        "current_bars_since_b": "B'den Bugüne (bar)",
+        "time_confluence"     : "Zaman Confluence",
+        "symmetry_match"      : "Zaman Simetrisi",
+        "confidence_score"    : "Confidence Skoru",
     }
 
     df_out = pd.DataFrame(results)
     df_out = df_out[[c for c in col_map if c in df_out.columns]]
     df_out = df_out.rename(columns=col_map)
 
-    # RSI diverjansına göre sırala (en güçlü diverjans önce)
-    df_out = df_out.sort_values("RSI Diverjans", ascending=False)
+    # Önce confidence skoruna (zaman confluence + simetri dahil), sonra
+    # RSI diverjansına göre sırala (en güçlü sinyal önce)
+    df_out = df_out.sort_values(["Confidence Skoru", "RSI Diverjans"], ascending=[False, False])
     df_out = df_out.reset_index(drop=True)
 
     log_status(f"\n{'═'*65}")
