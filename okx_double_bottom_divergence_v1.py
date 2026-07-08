@@ -148,6 +148,15 @@ TIME_CONFLUENCE_TOLERANCE_BARS = 2    # 4h'de ±2 mum = ±8 saat
 TIME_SYMMETRY_TOLERANCE       = 0.2   # Geçmiş swing sürelerine göre ±%20
 BASE_CONFIDENCE_SCORE         = 1.0   # Fibo+RSI kapısını geçen her sinyalin taban puanı
 
+# ── SİNYAL TİPİ B: FİB CONFLUENCE + RSI OVERSOLD (bağımsız tarayıcı) ──
+# İki bağımsız swing'in 0.618/0.786/1.272/1.618 seviyeleri güncel fiyatta
+# çakışıyor mu + RSI aşırı satımda mı kontrol eder. find_ab_fibonacci_signal
+# ve signal_validation.evaluate_signal'dan tamamen bağımsız, üçüncü bir
+# tarayıcıdır.
+FIB_CONFLUENCE_LEVELS    = [0.618, 0.786, 1.272, 1.618]
+FIB_CONFLUENCE_TOLERANCE = float(os.environ.get("FIB_CONFLUENCE_TOLERANCE", 0.03))
+RSI_OVERSOLD_THRESHOLD   = 35
+
 # ── DİĞER ────────────────────────────────────────────────────────────
 PAUSE_SEC        = 0.22
 EXPORT_CSV       = True
@@ -177,6 +186,7 @@ def log_settings():
     log_status(f"   Min RSI Diverjans: {MIN_RSI_DIVERGE} puan")
     log_status(f"   Zaman Confluence : oranlar={TIME_PROJECTION_RATIOS}, tolerans=±{TIME_CONFLUENCE_TOLERANCE_BARS} bar (opsiyonel puan)")
     log_status(f"   Zaman Simetrisi  : tolerans=±%{TIME_SYMMETRY_TOLERANCE*100:.0f} (opsiyonel puan)")
+    log_status(f"   Sinyal Tipi B    : Fib seviyeleri={FIB_CONFLUENCE_LEVELS}, tolerans=±%{FIB_CONFLUENCE_TOLERANCE*100:.0f}, RSI oversold<{RSI_OVERSOLD_THRESHOLD}")
 
 
 # ─── FONKSİYONLAR ─────────────────────────────────────────────────────
@@ -447,6 +457,180 @@ def find_ab_fibonacci_signal(df, verbose=False):
     return None
 
 
+def compute_fib_levels(a_price, b_price, a_type, ratios):
+    """Bir A-B swing'i için verilen fibonacci oranlarında seviye fiyatları hesaplar.
+
+    find_ab_fibonacci_signal ile aynı yön mantığı: A dip ise seviyeler B'den
+    aşağı yönde (retracement/uzantı destek gibi), A zirve ise B'den yukarı
+    yönde (direnç gibi) projekte edilir.
+    """
+    distance = abs(b_price - a_price)
+    levels = {}
+    for r in ratios:
+        levels[r] = (b_price - r * distance) if a_type == "dip" else (b_price + r * distance)
+    return levels
+
+
+def find_fib_confluence_signal(df, verbose=False):
+    """
+    ══════════════════════════════════════════════════════════════
+    SİNYAL TİPİ B — Fib Confluence + RSI Oversold (BAĞIMSIZ tarayıcı)
+
+    find_ab_fibonacci_signal (Sinyal A-B/ABC) ve signal_validation.
+    evaluate_signal (Double Bottom, Sinyal Tipi A) ile paylaşılan bir
+    kod yolu YOKTUR — tamamen ayrı, kendi başına çalışan üçüncü bir
+    tarayıcıdır.
+
+    MANTIK:
+      1) Aynı sembol için TIME_WINDOWS_DAYS (90→3 gün) pencerelerinin
+         her biri kendi A-B swing'ini üretir. Script genel bir
+         çoklu-pivot swing dedektörü içermediğinden, "iki bağımsız
+         swing" burada FARKLI zaman ölçeklerinde hesaplanan bu A-B
+         uçları olarak ele alınmıştır (yaklaşımdır, gerçek ardışık
+         geçmiş pivot taraması değildir). Küçük bir pencere büyük bir
+         pencereyle birebir AYNI A-B çiftini üretirse (büyük pencerenin
+         ekstremumu küçük pencerenin içine de düşerse) bu tekrar
+         sayılmaz — gerçekte bağımsız iki swing yoktur.
+      2) Her swing için 0.618/0.786/1.272/1.618 fibonacci seviyeleri
+         hesaplanır (compute_fib_levels).
+      3) FARKLI iki pencereden gelen swing'lerin herhangi bir seviye
+         çifti, güncel fiyata AYRI AYRI ±FIB_CONFLUENCE_TOLERANCE
+         içindeyse → fib_confluence (iki bağımsız swing güncel fiyat
+         bölgesinde çakışıyor).
+      4) Güncel RSI < RSI_OVERSOLD_THRESHOLD (aşırı satım) olmalı.
+
+    fib_confluence VE rsi_oversold birlikte sağlanırsa sinyal üretilir.
+    Bu, find_ab_fibonacci_signal'ın gate/skorlama mantığını etkilemez.
+    ══════════════════════════════════════════════════════════════
+    """
+    close = df["close"]
+    rsi   = compute_rsi(close, RSI_PERIOD)
+
+    current_price = close.iloc[-1]
+    current_rsi   = rsi.iloc[-1]
+
+    if pd.isna(current_rsi):
+        return None
+
+    if current_rsi >= RSI_OVERSOLD_THRESHOLD:
+        if verbose:
+            log_status(f"   [FibConfluence] atlandı → RSI oversold değil (RSI={current_rsi:.2f} ≥ {RSI_OVERSOLD_THRESHOLD})")
+        return None
+
+    swings = []
+    for window_days in TIME_WINDOWS_DAYS:
+        window_candles = window_days * CANDLES_PER_DAY
+        if len(df) < window_candles:
+            continue
+
+        window = df.iloc[-window_candles:]
+        confirmed_window = window.iloc[:-1]   # bkz. find_ab_fibonacci_signal'daki B-özreferans notu
+        if len(confirmed_window) < 2:
+            continue
+
+        high_time = confirmed_window["high"].idxmax()
+        low_time  = confirmed_window["low"].idxmin()
+        if high_time == low_time:
+            continue
+
+        high_price = window["high"][high_time]
+        low_price  = window["low"][low_time]
+
+        if low_time < high_time:
+            a_time, a_price, a_type = low_time, low_price, "dip"
+            b_time, b_price, b_type = high_time, high_price, "zirve"
+        else:
+            a_time, a_price, a_type = high_time, high_price, "zirve"
+            b_time, b_price, b_type = low_time, low_price, "dip"
+
+        if abs(b_price - a_price) <= 0:
+            continue
+
+        # Daha küçük bir pencere, daha büyük bir pencereyle AYNI A-B çiftini
+        # üretebilir (büyük pencerenin ekstremumu küçük pencerenin içine de
+        # düşerse). Bu durumda gerçekte "bağımsız" iki swing yoktur — aynı
+        # swing'i iki kez saymamak için atlanır.
+        if any(sw["a_time"] == a_time and sw["b_time"] == b_time for sw in swings):
+            if verbose:
+                log_status(f"   [FibConfluence] pencere={window_days}g atlandı → daha önceki bir pencereyle aynı A-B çifti (bağımsız değil)")
+            continue
+
+        levels = compute_fib_levels(a_price, b_price, a_type, FIB_CONFLUENCE_LEVELS)
+        if any(lv <= 0 for lv in levels.values()):
+            continue
+
+        swings.append({
+            "window_days": window_days,
+            "a_type": a_type, "a_price": a_price, "a_time": a_time,
+            "b_type": b_type, "b_price": b_price, "b_time": b_time,
+            "levels": levels,
+        })
+
+        if verbose:
+            level_str = ", ".join(f"{r}={v:.6f}" for r, v in levels.items())
+            log_status(f"   [FibConfluence] pencere={window_days}g A({a_type})={a_price:.6f} B({b_type})={b_price:.6f} → {level_str}")
+
+    if len(swings) < 2:
+        if verbose:
+            log_status("   [FibConfluence] atlandı → en az 2 bağımsız swing bulunamadı")
+        return None
+
+    best_match = None
+    for i in range(len(swings)):
+        for j in range(i + 1, len(swings)):
+            swing_i, swing_j = swings[i], swings[j]
+            for ratio_i, level_i in swing_i["levels"].items():
+                dist_i = abs(current_price - level_i) / level_i
+                if dist_i > FIB_CONFLUENCE_TOLERANCE:
+                    continue
+                for ratio_j, level_j in swing_j["levels"].items():
+                    dist_j = abs(current_price - level_j) / level_j
+                    if dist_j > FIB_CONFLUENCE_TOLERANCE:
+                        continue
+
+                    combined_dist = dist_i + dist_j
+                    if best_match is None or combined_dist < best_match["combined_dist"]:
+                        best_match = {
+                            "combined_dist": combined_dist,
+                            "swing_i": swing_i, "ratio_i": ratio_i, "level_i": level_i, "dist_i": dist_i,
+                            "swing_j": swing_j, "ratio_j": ratio_j, "level_j": level_j, "dist_j": dist_j,
+                        }
+
+    if best_match is None:
+        if verbose:
+            log_status("   [FibConfluence] atlandı → hiçbir swing çifti güncel fiyatta çakışmadı")
+        return None
+
+    swing_i, swing_j = best_match["swing_i"], best_match["swing_j"]
+
+    return {
+        "current_price"        : round(float(current_price), 6),
+        "current_rsi"          : round(float(current_rsi), 2),
+        "rsi_oversold"          : True,
+        "swing_1_window_days"   : swing_i["window_days"],
+        "swing_1_a_type"        : swing_i["a_type"],
+        "swing_1_a_price"       : round(float(swing_i["a_price"]), 6),
+        "swing_1_a_time"        : swing_i["a_time"].isoformat(),
+        "swing_1_b_type"        : swing_i["b_type"],
+        "swing_1_b_price"       : round(float(swing_i["b_price"]), 6),
+        "swing_1_b_time"        : swing_i["b_time"].isoformat(),
+        "swing_1_fib_ratio"     : best_match["ratio_i"],
+        "swing_1_fib_price"     : round(float(best_match["level_i"]), 6),
+        "swing_1_dist_pct"      : round(float(best_match["dist_i"]) * 100, 3),
+        "swing_2_window_days"   : swing_j["window_days"],
+        "swing_2_a_type"        : swing_j["a_type"],
+        "swing_2_a_price"       : round(float(swing_j["a_price"]), 6),
+        "swing_2_a_time"        : swing_j["a_time"].isoformat(),
+        "swing_2_b_type"        : swing_j["b_type"],
+        "swing_2_b_price"       : round(float(swing_j["b_price"]), 6),
+        "swing_2_b_time"        : swing_j["b_time"].isoformat(),
+        "swing_2_fib_ratio"     : best_match["ratio_j"],
+        "swing_2_fib_price"     : round(float(best_match["level_j"]), 6),
+        "swing_2_dist_pct"      : round(float(best_match["dist_j"]) * 100, 3),
+        "candle_total"          : len(df),
+    }
+
+
 def _json_default(obj):
     """json.dump için numpy/pandas tiplerini native Python tiplerine çevirir."""
     if isinstance(obj, np.integer):
@@ -476,7 +660,8 @@ def validation_result_to_dict(symbol, validation, volume_24h_usdt=None):
     }
 
 
-def write_signal_outputs(results, validation_results, skipped_data, skipped_crit, total_scanned):
+def write_signal_outputs(results, validation_results, fib_confluence_results,
+                          skipped_data, skipped_crit, total_scanned):
     """Bulunan sinyalleri konsol yerine signals.json / signals.log dosyalarına yazar."""
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -492,6 +677,9 @@ def write_signal_outputs(results, validation_results, skipped_data, skipped_crit
             "time_confluence_tolerance_bars": TIME_CONFLUENCE_TOLERANCE_BARS,
             "time_symmetry_tolerance_pct": TIME_SYMMETRY_TOLERANCE * 100,
             "base_confidence_score": BASE_CONFIDENCE_SCORE,
+            "fib_confluence_levels": FIB_CONFLUENCE_LEVELS,
+            "fib_confluence_tolerance_pct": FIB_CONFLUENCE_TOLERANCE * 100,
+            "rsi_oversold_threshold": RSI_OVERSOLD_THRESHOLD,
         },
         "summary": {
             "total_scanned": total_scanned,
@@ -499,9 +687,11 @@ def write_signal_outputs(results, validation_results, skipped_data, skipped_crit
             "skipped_criteria_not_met": skipped_crit,
             "matched": len(results),
             "matched_double_bottom_validation": len(validation_results),
+            "matched_fib_confluence": len(fib_confluence_results),
         },
         "signals": results,
         "double_bottom_validation_signals": validation_results,
+        "fib_confluence_signals": fib_confluence_results,
     }
 
     with open(SIGNALS_JSON, "w", encoding="utf-8") as f:
@@ -526,6 +716,16 @@ def write_signal_outputs(results, validation_results, skipped_data, skipped_crit
             f"confidence={v['confidence']} | "
             f"stop={v['stop_price']} | pos_size={v['position_size']} | "
             f"reasons={v['reasons']}"
+        )
+
+    for f_sig in fib_confluence_results:
+        log_signal(
+            f"✅  [Fib Confluence] {f_sig['symbol']:<16} | "
+            f"RSI={f_sig['current_rsi']} (oversold) | "
+            f"Swing1({f_sig['swing_1_window_days']}g)={f_sig['swing_1_fib_ratio']}→{f_sig['swing_1_fib_price']} "
+            f"(Δ%{f_sig['swing_1_dist_pct']:.2f}) | "
+            f"Swing2({f_sig['swing_2_window_days']}g)={f_sig['swing_2_fib_ratio']}→{f_sig['swing_2_fib_price']} "
+            f"(Δ%{f_sig['swing_2_dist_pct']:.2f})"
         )
 
     log_status(f"💾  Sinyaller → {SIGNALS_JSON}")
@@ -573,8 +773,9 @@ def run_scanner():
     log_status(f"📊  {total} likit USDT Spot çifti taranacak")
     log_status(f"⏳  Tahmini süre: ~{total * PAUSE_SEC / 60:.0f} dakika\n")
 
-    results            = []
-    validation_results = []
+    results                = []
+    validation_results     = []
+    fib_confluence_results = []
     skipped_data       = 0
     skipped_crit       = 0
 
@@ -611,6 +812,13 @@ def run_scanner():
         else:
             log_signal(f"ℹ️  [Double Bottom Validation] {symbol:<16} reddedildi | reasons={validation.reasons}")
 
+        # Sinyal Tipi B: Fib Confluence + RSI Oversold — bağımsız üçüncü tarayıcı.
+        fib_confluence_result = find_fib_confluence_signal(df)
+        if fib_confluence_result is not None:
+            fib_confluence_result["symbol"] = symbol
+            fib_confluence_result["volume_24h_usdt"] = round(float(vol_24h), 2) if vol_24h is not None else None
+            fib_confluence_results.append(fib_confluence_result)
+
         if result is None:
             skipped_crit += 1
             time.sleep(PAUSE_SEC)
@@ -628,8 +836,9 @@ def run_scanner():
     log_status(f"  Kriter tutmadı : {skipped_crit}")
     log_status(f"  ✅  Eşleşen (A-B Fibonacci)         : {len(results)}")
     log_status(f"  ✅  Eşleşen (Double Bottom Doğrulama): {len(validation_results)}")
+    log_status(f"  ✅  Eşleşen (Fib Confluence — Tip B) : {len(fib_confluence_results)}")
 
-    write_signal_outputs(results, validation_results, skipped_data, skipped_crit, total)
+    write_signal_outputs(results, validation_results, fib_confluence_results, skipped_data, skipped_crit, total)
 
     # Double Bottom doğrulama CSV'si, A-B Fibonacci sonucu olsun ya da
     # olmasın bağımsız olarak yazılır (iki strateji birbirinden ayrı).
@@ -650,6 +859,34 @@ def run_scanner():
         val_fn = "okx_double_bottom_signals.csv"
         df_val.to_csv(val_fn, index=False, encoding="utf-8-sig")
         log_status(f"💾  CSV (Double Bottom)  → {val_fn}")
+
+    # Fib Confluence (Sinyal Tipi B) CSV'si de bağımsız olarak yazılır.
+    if EXPORT_CSV and fib_confluence_results:
+        fib_col_map = {
+            "symbol"              : "Sembol",
+            "current_price"       : "Güncel Fiyat",
+            "current_rsi"         : "Güncel RSI",
+            "swing_1_window_days" : "Swing1 Pencere (gün)",
+            "swing_1_a_type"      : "Swing1 A Tipi",
+            "swing_1_b_type"      : "Swing1 B Tipi",
+            "swing_1_fib_ratio"   : "Swing1 Fib Oranı",
+            "swing_1_fib_price"   : "Swing1 Fib Fiyatı",
+            "swing_1_dist_pct"    : "Swing1 Uzaklık%",
+            "swing_2_window_days" : "Swing2 Pencere (gün)",
+            "swing_2_a_type"      : "Swing2 A Tipi",
+            "swing_2_b_type"      : "Swing2 B Tipi",
+            "swing_2_fib_ratio"   : "Swing2 Fib Oranı",
+            "swing_2_fib_price"   : "Swing2 Fib Fiyatı",
+            "swing_2_dist_pct"    : "Swing2 Uzaklık%",
+            "volume_24h_usdt"     : "24s Hacim (USDT)",
+        }
+        df_fib = pd.DataFrame(fib_confluence_results)
+        df_fib = df_fib[[c for c in fib_col_map if c in df_fib.columns]]
+        df_fib = df_fib.rename(columns=fib_col_map)
+
+        fib_fn = "okx_fib_confluence_signals.csv"
+        df_fib.to_csv(fib_fn, index=False, encoding="utf-8-sig")
+        log_status(f"💾  CSV (Fib Confluence) → {fib_fn}")
 
     if not results:
         log_status("\n❌  A-B Fibonacci: Hiç aday bulunamadı.")
