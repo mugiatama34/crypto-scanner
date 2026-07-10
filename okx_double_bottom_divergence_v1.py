@@ -1,29 +1,32 @@
 # ╔══════════════════════════════════════════════════════════════════════╗
-# ║  OKX — DOUBLE BOTTOM + RSI DIVERJANS TARAYICI (tek strateji)        ║
-# ║  4 Saatlik | v3.0 (2026-07 refactor)                                 ║
+# ║  OKX — FIBONACCI CONFLUENCE TARAYICI (tek strateji)                 ║
+# ║  4 Saatlik | v4.0 (2026-07-10 pivot: Confluence artık ana strateji)  ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 #
-# GATE (Motor 2 — signal_validation.evaluate_signal, üçü de zorunlu):
-#   1) Double Bottom yapısı (Murphy: kırılım + hacim teyidi)
-#   2) RSI pozitif diverjans ≥5 puan VE iki dip arası ≥6 bar
-#   3) Fiyat Fibonacci 0.618–0.786 bandında
+# GATE (find_confluence_candidates + evaluate_confluence_entry, ikisi de zorunlu):
+#   1) İki BAĞIMSIZ swing'in (90/60/30 gün pencerelerinden) retracement/
+#      extension seviyeleri (0.618/0.786/1.272/1.618) güncel fiyatta
+#      AYRI AYRI ±%3 tolerans içinde çakışıyor (Boroden confluence)
+#   2) Güncel RSI < 35 (aşırı satım)
 #
 # CONFIDENCE (gate geçildikten sonra kademelendirir, gate'i etkilemez):
-#   low = sadece gate | medium = +Wyckoff hacim VEYA +Motor3 confluence
-#   high = +Wyckoff hacim VE +Motor3 confluence
-#   (Motor 3 = find_fib_confluence_signal: iki bağımsız swing'in fib
-#    seviyelerinin güncel fiyatta çakışması, Boroden confluence mantığı)
-#
-# BONUS (yalnızca bilgi/raporlama, ASLA gate/confidence'ı etkilemez):
-#   Elliott sanity check + Motor 1 (find_ab_fibonacci_signal: A-B Fibonacci
-#   geri çekilme + ABC uzantısı) sinyali varsa
+#   low    = sadece gate (confluence + RSI oversold)
+#   medium = + Double Bottom YAPISI var (signal_validation.check_double_bottom,
+#            2 dip + mesafe + tolerans - kırılım/hacim şart değil)
+#   high   = + Double Bottom TAM TEYİTLİ (signal_validation.evaluate_signal.is_valid,
+#            yani kırılım+hacim+RSI diverjans+fib bandı da AYRICA sağlanmış)
 #
 # RİSK: stop-loss her zaman ATR bazlı (compute_stop_and_size); pozisyon
 # büyüklüğü confidence kademesine göre 0.5R / 1.0R / 1.5R çarpanı alır.
 #
-# NOT: Bu üç motor önceden birbirinden bağımsız, paralel sinyal üreten
-# ayrı tarayıcılardı (3 ayrı CSV). 2026-07'de tek stratejiye indirgendi —
-# gerekçesi ve tam mimari için scanner_refactor_gorev.md dosyasına bakın.
+# İZLEME LİSTESİ: gate'i tam geçemeyen ama toplam mesafesi makul bir
+# sınırın (WATCHLIST_MAX_COMBINED_DIST_PCT) altında olan confluence
+# adayları, önceki tura göre yaklaşıyor/uzaklaşıyor bilgisiyle raporlanır.
+#
+# NOT: Önceki mimaride (v3.0) Double Bottom ana gate, Confluence bonus
+# katmanıydı. Kullanıcı tercihiyle 2026-07-10'da bu ilişki TERSİNE
+# ÇEVRİLDİ. Motor 1 (A-B Fibonacci + ABC uzantısı, tek swing) tamamen
+# kaldırıldı - confluence zaten onun daha güçlü (2 bağımsız swing) hali.
 #
 # Bağımlılıklar için requirements.txt dosyasına bakın.
 # Çalıştırma:
@@ -50,7 +53,10 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from signal_validation import evaluate_signal, evaluate_watchlist
+from signal_validation import (
+    evaluate_signal,
+    check_double_bottom, compute_stop_and_size,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -96,16 +102,14 @@ def load_previous_watchlist_state():
 
 def save_watchlist_state(watchlist_results):
     """Bu turun watchlist sonuclarini bir sonraki tur icin kaydeder
-    (GitHub Actions cache adimi bunu tasir). Swing referans zamanlarini da
-    saklar - boylece bir sonraki tur, bandin kendisi degisti mi yoksa
-    sadece fiyat mi hareket etti ayirt edebilir."""
+    (GitHub Actions cache adimi bunu tasir). reference_id, hangi 2 swing'in
+    karsilastirildigini parmak izi olarak tutar - boylece bir sonraki tur,
+    ayni swing ciftiyle mi kiyaslandigini yoksa referansin degisip
+    degismedigini ayirt edebilir."""
     state = {
         entry["symbol"]: {
-            "fib_distance_pct": entry.get("fib_distance_pct"),
-            "in_fib_zone": entry.get("in_fib_zone"),
-            "missing_steps": entry.get("missing_steps"),
-            "swing_high_time": entry.get("swing_high_time"),
-            "swing_low_time": entry.get("swing_low_time"),
+            "distance_pct": entry.get("combined_dist_pct"),
+            "reference_id": entry.get("reference_id"),
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
         for entry in watchlist_results
@@ -114,31 +118,29 @@ def save_watchlist_state(watchlist_results):
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
-def compute_momentum(symbol, current_distance_pct, previous_state,
-                      current_swing_high_time=None, current_swing_low_time=None):
+def compute_momentum(symbol, current_distance_pct, previous_state, current_reference_id=None):
     """Onceki tura gore mesafe degisimini hesaplar. Pozitif deger =
-    banda yaklasiyor (mesafe kucaliyor), negatif = uzaklasiyor.
+    confluence koridoruna yaklasiyor (toplam mesafe kucaliyor), negatif =
+    uzaklasiyor.
 
-    ONEMLI: Fib bandinin dayandigi swing (swing_high/low) referansi
-    degistiyse (yeni bir A-B swing tespit edildiyse veya 60-bar
-    penceresi kaydiysa), mesafe kiyaslamasi ELMA-ARMUT olur - fiyat
-    hareket etmese bile bant kaymis olabilir. Bu durumda numerik
-    momentum yerine "referans_degisti" donulur, yanlis sinyal verilmez.
+    ONEMLI: Karsilastirilan swing cifti (reference_id) degistiyse - yani
+    yeni bir A-B swing tespit edildiyse - mesafe kiyaslamasi ELMA-ARMUT
+    olur. Bu durumda numerik momentum yerine "referans_degisti" donulur,
+    yanlis sinyal verilmez.
     """
     prev = previous_state.get(symbol)
-    if prev is None or prev.get("fib_distance_pct") is None or current_distance_pct is None:
+    if prev is None or prev.get("distance_pct") is None or current_distance_pct is None:
         return None, "yeni"
 
-    prev_high_t = prev.get("swing_high_time")
-    prev_low_t = prev.get("swing_low_time")
+    prev_reference_id = prev.get("reference_id")
     reference_changed = (
-        (prev_high_t is not None and current_swing_high_time is not None and prev_high_t != current_swing_high_time)
-        or (prev_low_t is not None and current_swing_low_time is not None and prev_low_t != current_swing_low_time)
+        prev_reference_id is not None and current_reference_id is not None
+        and prev_reference_id != current_reference_id
     )
     if reference_changed:
         return None, "referans_degisti"
 
-    momentum = round(float(prev["fib_distance_pct"]) - float(current_distance_pct), 3)
+    momentum = round(float(prev["distance_pct"]) - float(current_distance_pct), 3)
     if momentum > 0.05:
         trend = "iyilesiyor"
     elif momentum < -0.05:
@@ -210,37 +212,27 @@ CANDLES_PER_DAY = timeframe_to_candles_per_day(TIMEFRAME)
 # anlamlı swing" varsayımını zayıflatarak gürültüyü artırıyordu.
 TIME_WINDOWS_DAYS = [90, 60, 30]
 
-# ── FİBONACCİ SEVİYELERİ (A-B GERİ ÇEKİLME / ABC UZANTISI) ───────────
-FIB_RETRACEMENT  = 0.618   # A-B hareketinin %61.8 geri çekilme seviyesi
-FIB_EXTENSION    = 1.272   # A-B mesafesinin B'den ters yönde %127.2 uzantısı
-SIGNAL_TOLERANCE = 0.05    # Güncel fiyat her iki seviyeye de ±%5 yakın olmalı
-
 # ── RSI ──────────────────────────────────────────────────────────────
 RSI_PERIOD       = 14
-MIN_RSI_DIVERGE  = 1.5     # A noktası ile güncel RSI arasındaki minimum diverjans (puan)
 
-# ── ZAMAN BAZLI CONFLUENCE PUANLAMASI (opsiyonel — sinyali reddetmez) ──
-# Fibo 0.618/1.272 + RSI teyidi geçen bir sinyal, aşağıdaki iki zaman
-# bazlı kontrolle EK puan alır. Bu kontroller hiçbir zaman bir sinyali
-# reddetmez (gate değil); sadece confidence_score'a katkı sağlar.
-TIME_PROJECTION_RATIOS       = [0.382, 0.618, 1.0, 1.272, 1.618]
-TIME_CONFLUENCE_TOLERANCE_BARS = 2    # 4h'de ±2 mum = ±8 saat
-TIME_SYMMETRY_TOLERANCE       = 0.2   # Geçmiş swing sürelerine göre ±%20
-BASE_CONFIDENCE_SCORE         = 1.0   # Fibo+RSI kapısını geçen her sinyalin taban puanı
-
-# ── SİNYAL TİPİ B: FİB CONFLUENCE + RSI OVERSOLD (bağımsız tarayıcı) ──
-# İki bağımsız swing'in 0.618/0.786/1.272/1.618 seviyeleri güncel fiyatta
-# çakışıyor mu + RSI aşırı satımda mı kontrol eder. find_ab_fibonacci_signal
-# ve signal_validation.evaluate_signal'dan tamamen bağımsız, üçüncü bir
-# tarayıcıdır.
+# ── CONFLUENCE (ANA STRATEJİ, 2026-07-10 pivot) ───────────────────────
+# İki bağımsız swing'in retracement/extension seviyeleri (0.618/0.786/
+# 1.272/1.618) güncel fiyatta çakışıyor mu + RSI aşırı satımda mı
+# kontrol eder. find_confluence_candidates ana gate'in TEK kaynağıdır;
+# Double Bottom (signal_validation.py) artık sadece confidence katmanı.
 FIB_CONFLUENCE_LEVELS    = [0.618, 0.786, 1.272, 1.618]
 FIB_CONFLUENCE_TOLERANCE = float(os.environ.get("FIB_CONFLUENCE_TOLERANCE", 0.03))
 RSI_OVERSOLD_THRESHOLD   = 35
+# Izleme listesi: gate'i (within_tolerance) tam gecemeyen ama toplam mesafesi
+# bu esigin altinda olan confluence adaylari "yaklasiyor/uzaklasiyor" olarak
+# raporlanir. FIB_CONFLUENCE_TOLERANCE'in (%3+%3=%6 max gate) uzerinde,
+# gurultuyu elemek icin makul bir tavan.
+WATCHLIST_MAX_COMBINED_DIST_PCT = float(os.environ.get("WATCHLIST_MAX_COMBINED_DIST_PCT", 16.0))
 
 # ── DİĞER ────────────────────────────────────────────────────────────
 PAUSE_SEC        = 0.22
 EXPORT_CSV       = True
-MIN_CANDLES      = 40      # En kısa pencere (3g=18 mum) + RSI ısınma dönemi için asgari veri
+MIN_CANDLES      = 40      # En kısa pencere (30g) + RSI ısınma dönemi için asgari veri
 
 # ── LİKİDİTE / STABLECOIN FİLTRELERİ ─────────────────────────────────
 MIN_24H_VOLUME_USDT = float(os.environ.get("MIN_24H_VOLUME_USDT", 1_000_000))
@@ -258,15 +250,11 @@ def is_stablecoin_pair(symbol):
 
 
 def log_settings():
-    log_status("✅  Ayarlar yüklendi — A-B Fibonacci + ABC Uzantısı Tarayıcı v2.0")
+    log_status("✅  Ayarlar yüklendi — OKX Confluence Tarayıcı v3.0 (Double Bottom = bonus katmanı)")
     log_status(f"   Zaman Dilimi     : {TIMEFRAME}")
     log_status(f"   Zaman Aralıkları : {', '.join(str(d) + 'g' for d in TIME_WINDOWS_DAYS)} (önce uzun, sonra kısa)")
-    log_status(f"   Fibo Seviyeleri  : {FIB_RETRACEMENT} (geri çekilme) / {FIB_EXTENSION} (ABC uzantısı)")
-    log_status(f"   Sinyal Toleransı : ±%{SIGNAL_TOLERANCE*100:.0f}")
-    log_status(f"   Min RSI Diverjans: {MIN_RSI_DIVERGE} puan")
-    log_status(f"   Zaman Confluence : oranlar={TIME_PROJECTION_RATIOS}, tolerans=±{TIME_CONFLUENCE_TOLERANCE_BARS} bar (opsiyonel puan)")
-    log_status(f"   Zaman Simetrisi  : tolerans=±%{TIME_SYMMETRY_TOLERANCE*100:.0f} (opsiyonel puan)")
-    log_status(f"   Sinyal Tipi B    : Fib seviyeleri={FIB_CONFLUENCE_LEVELS}, tolerans=±%{FIB_CONFLUENCE_TOLERANCE*100:.0f}, RSI oversold<{RSI_OVERSOLD_THRESHOLD}")
+    log_status(f"   Confluence       : Fib seviyeleri={FIB_CONFLUENCE_LEVELS}, tolerans=±%{FIB_CONFLUENCE_TOLERANCE*100:.0f}, RSI oversold<{RSI_OVERSOLD_THRESHOLD}")
+    log_status(f"   İzleme sınırı    : toplam mesafe ≤ %{WATCHLIST_MAX_COMBINED_DIST_PCT:.0f}")
 
 
 # ─── FONKSİYONLAR ─────────────────────────────────────────────────────
@@ -326,221 +314,11 @@ def fetch_ohlcv_paginated(exchange, symbol, timeframe, since_ms, pause=0.22):
     return df
 
 
-def find_ab_fibonacci_signal(df, verbose=False):
-    """
-    ══════════════════════════════════════════════════════════════
-    ANA ALGORİTMA — A-B Fibonacci Geri Çekilme + ABC Uzantısı
-
-    Zaman aralıkları öncelik sırasıyla denenir: 90 → 60 → 30 → 15 → 7 → 3
-    gün. İlk eşleşme bulunan aralıkta durulur, daha kısa aralıklara
-    geçilmez.
-
-    Her aralıkta:
-      A = dönemin kronolojik olarak ilk oluşan ucu (en yüksek ya da en düşük)
-      B = dönemin kronolojik olarak sonra oluşan ucu
-
-      A dip, B zirve  → yükseliş bacağı (Fibo seviyeleri B'den aşağı yönde)
-      A zirve, B dip  → düşüş bacağı   (Fibo seviyeleri B'den yukarı yönde)
-
-      Fibo 0.618  : B - 0.618×|B-A|  (yükselişte) / B + 0.618×|B-A|  (düşüşte)
-      Fibo 1.272  : B - 1.272×|B-A|  (yükselişte) / B + 1.272×|B-A|  (düşüşte)
-        (A-B'nin ters yönünde, B'den itibaren projekte edilir → ABC uzantısı)
-
-    SİNYAL ŞARTI:
-      Güncel fiyat HEM 0.618 HEM 1.272 seviyesine ±SIGNAL_TOLERANCE
-      içinde olmalı (iki koşul birlikte).
-
-    RSI TEYİDİ:
-      Yükseliş bacağında (A dip)  : RSI(güncel) − RSI(A) ≥ MIN_RSI_DIVERGE
-      Düşüş bacağında   (A zirve) : RSI(A) − RSI(güncel) ≥ MIN_RSI_DIVERGE
-
-    ÖNEMLİ: A/B, pencerenin SON (henüz kapanmamış/en güncel) mumu HARİÇ
-    tutularak aranır. Aksi halde B = güncel mum olabilir; bu durumda
-    "güncel fiyatın B'den hesaplanan hedefe yakınlığı" testi kendi
-    verisiyle kendini doğrulayan anlamsız bir kontrole dönüşür (B zaten
-    güncel mumun high/low'undan türetildiği için current_price'a
-    yapay şekilde yakın çıkar).
-
-    OPSİYONEL ZAMAN CONFLUENCE PUANI (gate değil, sinyali reddetmez):
-      • Zaman projeksiyonu: A-B süresi (bar) × [0.382, 0.618, 1.0, 1.272,
-        1.618] ile olası "dönüş" noktaları projekte edilir; B'den bugüne
-        kadar geçen bar sayısı bu noktalardan birine ±2 bar yakınsa
-        time_confluence=True.
-      • Zaman simetrisi: Bu taramada (aynı sembol için) A-B'den ÖNCE
-        denenmiş daha uzun pencerelerin kendi A-B swing süreleri, "geçmiş
-        düzeltme süreleri" için kaba bir yaklaşım olarak kullanılır (script
-        genel bir çoklu-pivot dedektörü içermediğinden). Güncel swing
-        süresi bunların ortalamasına ±%20 yakınsa symmetry_match=True.
-      • confidence_score = BASE_CONFIDENCE_SCORE + 0.5×time_confluence
-        + 0.5×symmetry_match  (aralık: 1.0 – 2.0)
-    ══════════════════════════════════════════════════════════════
-    """
-    close = df["close"]
-    rsi   = compute_rsi(close, RSI_PERIOD)
-
-    current_price = close.iloc[-1]
-    current_rsi   = rsi.iloc[-1]
-    current_pos   = len(df) - 1
-
-    if pd.isna(current_rsi):
-        return None
-
-    # Bu taramada (cascade sırasında) hesaplanan A-B swing süreleri (bar).
-    # Eşleşme bulunduğunda, o ana kadar denenmiş (daha uzun) pencerelerin
-    # swing süreleri "geçmiş düzeltme süresi" yaklaşımı olarak kullanılır.
-    past_swing_durations = []
-
-    for window_days in TIME_WINDOWS_DAYS:
-        window_candles = window_days * CANDLES_PER_DAY
-
-        if len(df) < window_candles:
-            if verbose:
-                log_status(f"   [{window_days}g] atlandı → yetersiz veri ({len(df)} < {window_candles} mum)")
-            continue
-
-        window = df.iloc[-window_candles:]
-
-        # Son mum A/B aramasından hariç tutulur (bkz. yukarıdaki ÖNEMLİ notu).
-        confirmed_window = window.iloc[:-1]
-        if len(confirmed_window) < 2:
-            if verbose:
-                log_status(f"   [{window_days}g] atlandı → teyitli mum sayısı yetersiz")
-            continue
-
-        high_time = confirmed_window["high"].idxmax()
-        low_time  = confirmed_window["low"].idxmin()
-
-        if high_time == low_time:
-            if verbose:
-                log_status(f"   [{window_days}g] atlandı → zirve ve dip aynı mumda (dejenere)")
-            continue
-
-        high_price = window["high"][high_time]
-        low_price  = window["low"][low_time]
-
-        if low_time < high_time:
-            a_time, a_price, a_type = low_time, low_price, "dip"
-            b_time, b_price, b_type = high_time, high_price, "zirve"
-        else:
-            a_time, a_price, a_type = high_time, high_price, "zirve"
-            b_time, b_price, b_type = low_time, low_price, "dip"
-
-        distance = abs(b_price - a_price)
-        if distance <= 0:
-            continue
-
-        a_pos = df.index.get_loc(a_time)
-        b_pos = df.index.get_loc(b_time)
-        swing_duration_bars = b_pos - a_pos
-
-        if a_type == "dip":   # Yükseliş bacağı (A dip → B zirve)
-            fib618_price  = b_price - FIB_RETRACEMENT * distance
-            ext1272_price = b_price - FIB_EXTENSION * distance
-        else:                 # Düşüş bacağı (A zirve → B dip)
-            fib618_price  = b_price + FIB_RETRACEMENT * distance
-            ext1272_price = b_price + FIB_EXTENSION * distance
-
-        if fib618_price <= 0 or ext1272_price <= 0:
-            continue
-
-        # Bu pencerenin (geçerli) swing süresi, sonraki (daha kısa) bir
-        # pencerede eşleşme bulunursa zaman simetrisi kıyaslaması için
-        # "geçmiş düzeltme süresi" adayı olarak saklanır.
-        if swing_duration_bars > 0:
-            past_swing_durations.append(swing_duration_bars)
-
-        dist_fib618_pct  = abs(current_price - fib618_price) / fib618_price
-        dist_ext1272_pct = abs(current_price - ext1272_price) / ext1272_price
-
-        if verbose:
-            log_status(
-                f"   [{window_days}g] A={a_type}@{a_price:.6f} B={b_type}@{b_price:.6f} | "
-                f"Fib618={fib618_price:.6f} (Δ%{dist_fib618_pct*100:.2f}) | "
-                f"Ext1272={ext1272_price:.6f} (Δ%{dist_ext1272_pct*100:.2f})"
-            )
-
-        if dist_fib618_pct > SIGNAL_TOLERANCE or dist_ext1272_pct > SIGNAL_TOLERANCE:
-            continue   # Bu aralıkta eşleşme yok → bir sonraki (daha kısa) aralığı dene
-
-        a_rsi = rsi.loc[a_time]
-        if pd.isna(a_rsi):
-            if verbose:
-                log_status(f"   [{window_days}g] atlandı → A noktasında RSI henüz hesaplanamıyor (ısınma dönemi)")
-            continue
-
-        if a_type == "dip":
-            rsi_divergence = current_rsi - a_rsi
-        else:
-            rsi_divergence = a_rsi - current_rsi
-
-        if rsi_divergence < MIN_RSI_DIVERGE:
-            if verbose:
-                log_status(f"   [{window_days}g] atlandı → RSI teyidi yetersiz (diverjans={rsi_divergence:.2f} < {MIN_RSI_DIVERGE})")
-            continue   # RSI teyidi sağlanmadı → bu aralıkta sinyal yok
-
-        # ── Opsiyonel zaman confluence puanı (gate değil) ─────────────
-        current_bars_since_b = current_pos - b_pos
-
-        projected_turn_bars = [swing_duration_bars * r for r in TIME_PROJECTION_RATIOS]
-        time_confluence = any(
-            abs(current_bars_since_b - p) <= TIME_CONFLUENCE_TOLERANCE_BARS
-            for p in projected_turn_bars
-        )
-
-        # past_swing_durations'ın son elemanı bu swing'in kendisi; simetri
-        # kıyaslaması "geçmiş" (bu taramada daha önce denenmiş daha uzun
-        # pencerelerin) süreleriyle yapılır, kendisiyle değil.
-        past_durations = past_swing_durations[:-1]
-        symmetry_match = False
-        avg_past_duration = None
-        if past_durations:
-            avg_past_duration = sum(past_durations) / len(past_durations)
-            if avg_past_duration > 0:
-                symmetry_match = abs(swing_duration_bars - avg_past_duration) / avg_past_duration < TIME_SYMMETRY_TOLERANCE
-
-        confidence_score = BASE_CONFIDENCE_SCORE + (0.5 if time_confluence else 0) + (0.5 if symmetry_match else 0)
-
-        if verbose:
-            log_status(
-                f"   [{window_days}g] zaman: swing={swing_duration_bars} bar, B'den bugüne={current_bars_since_b} bar, "
-                f"projeksiyon={[round(p,1) for p in projected_turn_bars]} → confluence={time_confluence} | "
-                f"geçmiş ort.={round(avg_past_duration,1) if avg_past_duration is not None else 'yok'} → simetri={symmetry_match} | "
-                f"confidence_score={confidence_score}"
-            )
-
-        return {
-            "window_days"        : window_days,
-            "direction"          : "yukselis_sonrasi_duzeltme" if a_type == "dip" else "dusus_sonrasi_tepki",
-            "a_type"             : a_type,
-            "a_price"            : round(float(a_price), 6),
-            "a_time"             : a_time.isoformat(),
-            "b_type"             : b_type,
-            "b_price"            : round(float(b_price), 6),
-            "b_time"             : b_time.isoformat(),
-            "fib618_price"       : round(float(fib618_price), 6),
-            "ext1272_price"      : round(float(ext1272_price), 6),
-            "current_price"      : round(float(current_price), 6),
-            "dist_to_fib618_pct" : round(float(dist_fib618_pct) * 100, 3),
-            "dist_to_ext1272_pct": round(float(dist_ext1272_pct) * 100, 3),
-            "a_rsi"              : round(float(a_rsi), 2),
-            "current_rsi"        : round(float(current_rsi), 2),
-            "rsi_divergence"     : round(float(rsi_divergence), 2),
-            "candle_total"       : len(df),
-            "swing_duration_bars"  : int(swing_duration_bars),
-            "current_bars_since_b" : int(current_bars_since_b),
-            "time_confluence"       : bool(time_confluence),
-            "symmetry_match"        : bool(symmetry_match),
-            "past_swing_sample_size": len(past_durations),
-            "confidence_score"      : round(float(confidence_score), 2),
-        }
-
-    return None
-
 
 def compute_fib_levels(a_price, b_price, a_type, ratios):
     """Bir A-B swing'i için verilen fibonacci oranlarında seviye fiyatları hesaplar.
 
-    find_ab_fibonacci_signal ile aynı yön mantığı: A dip ise seviyeler B'den
+    find_confluence_candidates ile aynı yön mantığı: A dip ise seviyeler B'den
     aşağı yönde (retracement/uzantı destek gibi), A zirve ise B'den yukarı
     yönde (direnç gibi) projekte edilir.
     """
@@ -551,36 +329,40 @@ def compute_fib_levels(a_price, b_price, a_type, ratios):
     return levels
 
 
-def find_fib_confluence_signal(df, verbose=False):
+def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
     """
     ══════════════════════════════════════════════════════════════
-    SİNYAL TİPİ B — Fib Confluence + RSI Oversold (BAĞIMSIZ tarayıcı)
+    CONFLUENCE ADAYI TESPITI (2026-07 refactor: artik ANA GATE'in
+    kaynagi. Eskiden "Motor 3 / Sinyal Tipi B" adiyla sadece bonus
+    puan veren bagimsiz bir tarayiciydi; artik stratejinin merkezi.)
 
-    find_ab_fibonacci_signal (Sinyal A-B/ABC) ve signal_validation.
-    evaluate_signal (Double Bottom, Sinyal Tipi A) ile paylaşılan bir
-    kod yolu YOKTUR — tamamen ayrı, kendi başına çalışan üçüncü bir
-    tarayıcıdır.
+    MANTIK (Boroden confluence teorisi):
+      1) TIME_WINDOWS_DAYS (90/60/30 gun) pencerelerinin her biri kendi
+         A-B swing'ini uretir. Farkli zaman olceklerinden gelen bu uclar
+         "bagimsiz swing" olarak ele alinir (yaklasimdir, gercek ardisik
+         pivot taramasi degildir). Ayni A-B ciftini tekrar sayan pencereler
+         atlanir.
+      2) Her swing icin retracement VE extension seviyeleri hesaplanir
+         (FIB_CONFLUENCE_LEVELS = 0.618, 0.786, 1.272, 1.618).
+      3) TUM olasi (swing_i, swing_j, ratio_i, ratio_j) kombinasyonlari
+         arasindan, guncel fiyata TOPLAM mesafesi (dist_i + dist_j) en
+         kucuk olan cift secilir - toleransin icinde olsun ya da olmasin.
+         Bu, hem GATE (tam eslesme) hem WATCHLIST (yaklasan ama henuz
+         tam eslesmeyen) icin TEK bir ortak kaynak olmasini saglar.
 
-    MANTIK:
-      1) Aynı sembol için TIME_WINDOWS_DAYS (90→3 gün) pencerelerinin
-         her biri kendi A-B swing'ini üretir. Script genel bir
-         çoklu-pivot swing dedektörü içermediğinden, "iki bağımsız
-         swing" burada FARKLI zaman ölçeklerinde hesaplanan bu A-B
-         uçları olarak ele alınmıştır (yaklaşımdır, gerçek ardışık
-         geçmiş pivot taraması değildir). Küçük bir pencere büyük bir
-         pencereyle birebir AYNI A-B çiftini üretirse (büyük pencerenin
-         ekstremumu küçük pencerenin içine de düşerse) bu tekrar
-         sayılmaz — gerçekte bağımsız iki swing yoktur.
-      2) Her swing için 0.618/0.786/1.272/1.618 fibonacci seviyeleri
-         hesaplanır (compute_fib_levels).
-      3) FARKLI iki pencereden gelen swing'lerin herhangi bir seviye
-         çifti, güncel fiyata AYRI AYRI ±FIB_CONFLUENCE_TOLERANCE
-         içindeyse → fib_confluence (iki bağımsız swing güncel fiyat
-         bölgesinde çakışıyor).
-      4) Güncel RSI < RSI_OVERSOLD_THRESHOLD (aşırı satım) olmalı.
+    RSI aşırı satim SARTI BURADA UYGULANMAZ (eskiden erken donus vardi,
+    bu yuzden RSI oversold degilken watchlist adaylari hic bulunamiyordu).
+    Onun yerine current_rsi ve rsi_oversold bilgisi sonuca eklenir; GATE
+    kararini veren ust katman (run_scanner) bunu kullanir.
 
-    fib_confluence VE rsi_oversold birlikte sağlanırsa sinyal üretilir.
-    Bu, find_ab_fibonacci_signal'ın gate/skorlama mantığını etkilemez.
+    Donus: None (2'den az bagimsiz swing varsa) VEYA best-match dict:
+      {
+        ... swing_1_*/swing_2_* alanlari (eskisiyle ayni format) ...,
+        "dist_i_pct", "dist_j_pct": her ayagin ayri ayri % mesafesi,
+        "combined_dist_pct": toplam mesafe (watchlist siralamasi icin),
+        "within_tolerance": HEM dist_i HEM dist_j <= FIB_CONFLUENCE_TOLERANCE mi,
+        "current_rsi", "rsi_oversold": RSI durumu (gate karari ust katmanda),
+      }
     ══════════════════════════════════════════════════════════════
     """
     close = df["close"]
@@ -592,11 +374,6 @@ def find_fib_confluence_signal(df, verbose=False):
     if pd.isna(current_rsi):
         return None
 
-    if current_rsi >= RSI_OVERSOLD_THRESHOLD:
-        if verbose:
-            log_status(f"   [FibConfluence] atlandı → RSI oversold değil (RSI={current_rsi:.2f} ≥ {RSI_OVERSOLD_THRESHOLD})")
-        return None
-
     swings = []
     for window_days in TIME_WINDOWS_DAYS:
         window_candles = window_days * CANDLES_PER_DAY
@@ -604,7 +381,7 @@ def find_fib_confluence_signal(df, verbose=False):
             continue
 
         window = df.iloc[-window_candles:]
-        confirmed_window = window.iloc[:-1]   # bkz. find_ab_fibonacci_signal'daki B-özreferans notu
+        confirmed_window = window.iloc[:-1]
         if len(confirmed_window) < 2:
             continue
 
@@ -626,13 +403,9 @@ def find_fib_confluence_signal(df, verbose=False):
         if abs(b_price - a_price) <= 0:
             continue
 
-        # Daha küçük bir pencere, daha büyük bir pencereyle AYNI A-B çiftini
-        # üretebilir (büyük pencerenin ekstremumu küçük pencerenin içine de
-        # düşerse). Bu durumda gerçekte "bağımsız" iki swing yoktur — aynı
-        # swing'i iki kez saymamak için atlanır.
         if any(sw["a_time"] == a_time and sw["b_time"] == b_time for sw in swings):
             if verbose:
-                log_status(f"   [FibConfluence] pencere={window_days}g atlandı → daha önceki bir pencereyle aynı A-B çifti (bağımsız değil)")
+                log_status(f"   [Confluence] pencere={window_days}g atlandı → aynı A-B çifti (bağımsız değil)")
             continue
 
         levels = compute_fib_levels(a_price, b_price, a_type, FIB_CONFLUENCE_LEVELS)
@@ -648,11 +421,11 @@ def find_fib_confluence_signal(df, verbose=False):
 
         if verbose:
             level_str = ", ".join(f"{r}={v:.6f}" for r, v in levels.items())
-            log_status(f"   [FibConfluence] pencere={window_days}g A({a_type})={a_price:.6f} B({b_type})={b_price:.6f} → {level_str}")
+            log_status(f"   [Confluence] pencere={window_days}g A({a_type})={a_price:.6f} B({b_type})={b_price:.6f} → {level_str}")
 
     if len(swings) < 2:
         if verbose:
-            log_status("   [FibConfluence] atlandı → en az 2 bağımsız swing bulunamadı")
+            log_status("   [Confluence] atlandı → en az 2 bağımsız swing bulunamadı")
         return None
 
     best_match = None
@@ -661,11 +434,14 @@ def find_fib_confluence_signal(df, verbose=False):
             swing_i, swing_j = swings[i], swings[j]
             for ratio_i, level_i in swing_i["levels"].items():
                 dist_i = abs(current_price - level_i) / level_i
-                if dist_i > FIB_CONFLUENCE_TOLERANCE:
+                # cok uzak (watch_tolerance'in cok disinda) kombinasyonlari
+                # erken elemek performans icin - ama tam esitsizlik degil,
+                # gevsek bir on-filtre (watch_tolerance zaten gate toleransindan genis)
+                if dist_i > watch_tolerance * 2:
                     continue
                 for ratio_j, level_j in swing_j["levels"].items():
                     dist_j = abs(current_price - level_j) / level_j
-                    if dist_j > FIB_CONFLUENCE_TOLERANCE:
+                    if dist_j > watch_tolerance * 2:
                         continue
 
                     combined_dist = dist_i + dist_j
@@ -678,15 +454,19 @@ def find_fib_confluence_signal(df, verbose=False):
 
     if best_match is None:
         if verbose:
-            log_status("   [FibConfluence] atlandı → hiçbir swing çifti güncel fiyatta çakışmadı")
+            log_status("   [Confluence] atlandı → hiçbir swing çifti fiyata makul mesafede değil")
         return None
 
     swing_i, swing_j = best_match["swing_i"], best_match["swing_j"]
+    within_tolerance = (
+        best_match["dist_i"] <= FIB_CONFLUENCE_TOLERANCE
+        and best_match["dist_j"] <= FIB_CONFLUENCE_TOLERANCE
+    )
 
     return {
         "current_price"        : round(float(current_price), 6),
         "current_rsi"          : round(float(current_rsi), 2),
-        "rsi_oversold"          : True,
+        "rsi_oversold"          : bool(current_rsi < RSI_OVERSOLD_THRESHOLD),
         "swing_1_window_days"   : swing_i["window_days"],
         "swing_1_a_type"        : swing_i["a_type"],
         "swing_1_a_price"       : round(float(swing_i["a_price"]), 6),
@@ -707,11 +487,79 @@ def find_fib_confluence_signal(df, verbose=False):
         "swing_2_fib_ratio"     : best_match["ratio_j"],
         "swing_2_fib_price"     : round(float(best_match["level_j"]), 6),
         "swing_2_dist_pct"      : round(float(best_match["dist_j"]) * 100, 3),
+        "combined_dist_pct"     : round(float(best_match["combined_dist"]) * 100, 3),
+        "within_tolerance"      : bool(within_tolerance),
         "candle_total"          : len(df),
     }
 
 
-def _json_default(obj):
+def evaluate_confluence_entry(df, candidate, equity=1000, risk_pct=0.015):
+    """
+    ══════════════════════════════════════════════════════════════
+    YENI ANA GATE (2026-07-10 pivot): Confluence artik birincil strateji,
+    Double Bottom bonus/confidence katmanina indirgendi (eskiden tam
+    tersiydi). Kullanicinin gercek giris mantigi: iki bagimsiz swing'in
+    retracement + extension seviyelerinin fiyatta cakismasi.
+
+    GATE (ikisi de zorunlu):
+      1) candidate["within_tolerance"] - HEM swing_1 HEM swing_2'nin
+         fib seviyesi guncel fiyata FIB_CONFLUENCE_TOLERANCE icinde
+      2) candidate["rsi_oversold"] - RSI < RSI_OVERSOLD_THRESHOLD
+
+    CONFIDENCE (gate gectikten sonra kademelendirir):
+      low    = sadece gate
+      medium = gate + Double Bottom YAPISI var (2 dip + mesafe + tolerans,
+               kirilim/hacim/RSI/fib şart degil - sadece yapi)
+      high   = gate + Double Bottom TAM TEYITLI (evaluate_signal.is_valid)
+               yani kirilim+hacim+RSI diverjans+fib bandi da AYRICA saglanmis
+
+    RISK: stop ATR bazli (confidence'tan bagimsiz), pozisyon 0.5R/1.0R/1.5R.
+
+    Donus: None (gate gecmedi) VEYA dict (sinyal detaylari).
+    ══════════════════════════════════════════════════════════════
+    """
+    if candidate is None or not candidate.get("within_tolerance") or not candidate.get("rsi_oversold"):
+        return None
+
+    entry_price = candidate["current_price"]
+
+    db = check_double_bottom(df)
+    double_bottom_structure = "low1_idx" in db
+
+    full_db_validation = evaluate_signal(df)
+    double_bottom_fully_confirmed = bool(full_db_validation.is_valid)
+
+    if double_bottom_fully_confirmed:
+        confidence = "high"
+    elif double_bottom_structure:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    risk_calc = compute_stop_and_size(df, entry_price, equity, risk_pct)
+    position_multiplier = {"low": 0.5, "medium": 1.0, "high": 1.5}[confidence]
+    position_size = risk_calc["position_size"] * position_multiplier
+
+    return {
+        "confidence": confidence,
+        "double_bottom_structure": double_bottom_structure,
+        "double_bottom_fully_confirmed": double_bottom_fully_confirmed,
+        "entry_price": round(float(entry_price), 6),
+        "stop_price": round(float(risk_calc["stop_price"]), 6),
+        "position_size": round(float(position_size), 6),
+        "swing_1_window_days": candidate["swing_1_window_days"],
+        "swing_1_fib_ratio": candidate["swing_1_fib_ratio"],
+        "swing_1_fib_price": candidate["swing_1_fib_price"],
+        "swing_1_dist_pct": candidate["swing_1_dist_pct"],
+        "swing_2_window_days": candidate["swing_2_window_days"],
+        "swing_2_fib_ratio": candidate["swing_2_fib_ratio"],
+        "swing_2_fib_price": candidate["swing_2_fib_price"],
+        "swing_2_dist_pct": candidate["swing_2_dist_pct"],
+        "current_rsi": candidate["current_rsi"],
+    }
+
+
+
     """json.dump için numpy/pandas tiplerini native Python tiplerine çevirir."""
     if isinstance(obj, np.integer):
         return int(obj)
@@ -722,26 +570,6 @@ def _json_default(obj):
     if isinstance(obj, pd.Timestamp):
         return obj.isoformat()
     raise TypeError(f"'{type(obj)}' JSON'a çevrilemiyor")
-
-
-def validation_result_to_dict(symbol, validation, volume_24h_usdt=None):
-    """signal_validation.SignalResult'ı JSON'a yazılabilir bir sözlüğe çevirir."""
-    return {
-        "symbol": symbol,
-        "confidence": validation.confidence,
-        "wyckoff_volume_ok": bool(validation.checks.get("wyckoff_volume", {}).get("passed", False)),
-        "motor3_fib_confluence": validation.checks.get("motor3_fib_confluence") is not None,
-        "bonus_score": round(float(validation.bonus_score), 2),
-        "bonus_notes": validation.bonus_notes,
-        "reasons": validation.reasons,
-        "stop_price": round(float(validation.stop_price), 6) if validation.stop_price is not None else None,
-        "position_size": round(float(validation.position_size), 6) if validation.position_size is not None else None,
-        "fib_zone": (
-            [round(float(validation.fib_zone[0]), 6), round(float(validation.fib_zone[1]), 6)]
-            if validation.fib_zone is not None else None
-        ),
-        "volume_24h_usdt": round(float(volume_24h_usdt), 2) if volume_24h_usdt is not None else None,
-    }
 
 
 def write_signal_outputs(validation_results, watchlist_results, skipped_data, skipped_crit, total_scanned):
@@ -775,8 +603,8 @@ def write_signal_outputs(validation_results, watchlist_results, skipped_data, sk
     for v in validation_results:
         log_signal(
             f"✅  {v['symbol']:<16} | confidence={v['confidence']:<6} | "
-            f"wyckoff_ok={v['wyckoff_volume_ok']} | motor3_confluence={v['motor3_fib_confluence']} | "
-            f"bonus={v['bonus_score']} | stop={v['stop_price']} | pos_size={v['position_size']}"
+            f"db_yapi={v['double_bottom_structure']} | db_tam_teyit={v['double_bottom_fully_confirmed']} | "
+            f"entry={v['entry_price']} | stop={v['stop_price']} | pos_size={v['position_size']}"
         )
 
     log_status(f"💾  Sinyaller → {SIGNALS_JSON}")
@@ -848,71 +676,76 @@ def run_scanner():
             time.sleep(PAUSE_SEC)
             continue
 
-        # Motor 1 (A-B Fibonacci+ABC) ve Motor 3 (Fib Confluence) artık
-        # bağımsız tetikleyici DEĞİL — Motor 2'nin (Double Bottom) gate'ini
-        # geçen sinyaller için sadece bonus/confidence girdisi olarak
-        # kullanılıyor (2026-07 refactor, bkz. scanner_refactor_gorev.md).
-        result = find_ab_fibonacci_signal(df)                  # Motor 1 → bonus
-        fib_confluence_result = find_fib_confluence_signal(df) # Motor 3 → confidence
+        # 2026-07-10 pivot: Confluence artik ANA GATE. Double Bottom
+        # (evaluate_confluence_entry icinde) bonus/confidence katmani.
+        # Motor 1 (A-B/ABC) artik hic kullanilmiyor - confluence zaten
+        # onun yaptigi isin daha guclu (2-swing) versiyonu.
+        candidate = find_confluence_candidates(df)
         vol_24h = volume_by_symbol.get(symbol)
 
-        # evaluate_signal() ana gate: A-B tespiti bir sonuç bulduysa onun
-        # swing_high/swing_low'unu kullanır (son 60 bar max/min
-        # varsayılanından daha güvenilir); bulamadıysa kendi varsayılanına düşer.
-        swing_high = swing_low = None
-        swing_high_time = swing_low_time = None
-        if result is not None:
-            if result["a_price"] >= result["b_price"]:
-                swing_high, swing_high_time = result["a_price"], result["a_time"]
-                swing_low, swing_low_time = result["b_price"], result["b_time"]
-            else:
-                swing_high, swing_high_time = result["b_price"], result["b_time"]
-                swing_low, swing_low_time = result["a_price"], result["a_time"]
+        confluence_signal = evaluate_confluence_entry(df, candidate)
 
-        validation = evaluate_signal(
-            df, swing_high=swing_high, swing_low=swing_low,
-            fib_confluence_result=fib_confluence_result,
-            ab_fibonacci_result=result,
-        )
-
-        if validation.is_valid:
-            validation_results.append(
-                validation_result_to_dict(symbol, validation, vol_24h)
+        if confluence_signal is not None:
+            confluence_signal["symbol"] = symbol
+            confluence_signal["volume_24h_usdt"] = round(float(vol_24h), 2) if vol_24h is not None else None
+            validation_results.append(confluence_signal)
+            log_signal(
+                f"✅  {symbol:<16} | confidence={confluence_signal['confidence']:<6} | "
+                f"swing1={confluence_signal['swing_1_fib_ratio']}@%{confluence_signal['swing_1_dist_pct']} | "
+                f"swing2={confluence_signal['swing_2_fib_ratio']}@%{confluence_signal['swing_2_dist_pct']} | "
+                f"stop={confluence_signal['stop_price']} | pos_size={confluence_signal['position_size']}"
             )
         else:
             skipped_crit += 1
-            log_signal(f"ℹ️  [Double Bottom Validation] {symbol:<16} reddedildi | reasons={validation.reasons}")
+            if candidate is None:
+                log_signal(f"ℹ️  [Confluence] {symbol:<16} reddedildi | reasons=['En az 2 bağımsız swing bulunamadı']")
+            else:
+                reasons = []
+                if not candidate.get("within_tolerance"):
+                    reasons.append(f"Confluence tolerans dışı (toplam mesafe %{candidate['combined_dist_pct']})")
+                if not candidate.get("rsi_oversold"):
+                    reasons.append(f"RSI oversold değil (RSI={candidate['current_rsi']})")
+                log_signal(f"ℹ️  [Confluence] {symbol:<16} reddedildi | reasons={reasons}")
 
-            # Gate'i tam gecemedi ama yapisal olarak yakinsa izleme listesine al.
-            # Bu ISLEM TETIKLEMEZ, sadece "yaklasiyor" bilgisi tasir.
-            watch = evaluate_watchlist(
-                df, swing_high=swing_high, swing_low=swing_low,
-                swing_high_time=swing_high_time, swing_low_time=swing_low_time,
-            )
-            if watch is not None:
-                watch["symbol"] = symbol
-                watch["volume_24h_usdt"] = round(float(vol_24h), 2) if vol_24h is not None else None
-
-                momentum, trend = compute_momentum(
-                    symbol, watch.get("fib_distance_pct"), previous_watchlist_state,
-                    current_swing_high_time=watch.get("swing_high_time"),
-                    current_swing_low_time=watch.get("swing_low_time"),
-                )
-                watch["momentum_pct"] = momentum
-                watch["trend"] = trend
-
-                watchlist_results.append(watch)
-                log_signal(
-                    f"👀  [Izleme] {symbol:<16} | eksik={watch['missing_steps']} | "
-                    f"fib_mesafe=%{watch['fib_distance_pct']} ({watch['fib_direction']}) | "
-                    f"trend={trend} (momentum={momentum})"
-                    if not watch["in_fib_zone"] else
-                    f"👀  [Izleme] {symbol:<16} | eksik={watch['missing_steps']} | fib bandinin icinde"
-                )
-
-        # Motor 1 / Motor 3 ham çıktıları artık bağımsız CSV üretmiyor;
-        # sadece evaluate_signal() içine bonus/confidence girdisi olarak
-        # geçildiler (yukarıda). Burada ayrıca biriktirilmelerine gerek yok.
+                # Gate'i tam geçemedi ama toplam mesafesi makul bir sınırın
+                # altındaysa izleme listesine al. Bu İŞLEM TETİKLEMEZ.
+                if (not candidate["within_tolerance"]
+                        and candidate["combined_dist_pct"] <= WATCHLIST_MAX_COMBINED_DIST_PCT):
+                    reference_id = (
+                        f"{candidate['swing_1_a_time']}|{candidate['swing_1_b_time']}|"
+                        f"{candidate['swing_2_a_time']}|{candidate['swing_2_b_time']}"
+                    )
+                    momentum, trend = compute_momentum(
+                        symbol, candidate["combined_dist_pct"], previous_watchlist_state,
+                        current_reference_id=reference_id,
+                    )
+                    watch = {
+                        "symbol": symbol,
+                        "trend": trend,
+                        "momentum_pct": momentum,
+                        "combined_dist_pct": candidate["combined_dist_pct"],
+                        "current_rsi": candidate["current_rsi"],
+                        "rsi_oversold": candidate["rsi_oversold"],
+                        "swing_1_window_days": candidate["swing_1_window_days"],
+                        "swing_1_fib_ratio": candidate["swing_1_fib_ratio"],
+                        "swing_1_fib_price": candidate["swing_1_fib_price"],
+                        "swing_1_dist_pct": candidate["swing_1_dist_pct"],
+                        "swing_1_a_time": candidate["swing_1_a_time"],
+                        "swing_1_b_time": candidate["swing_1_b_time"],
+                        "swing_2_window_days": candidate["swing_2_window_days"],
+                        "swing_2_fib_ratio": candidate["swing_2_fib_ratio"],
+                        "swing_2_fib_price": candidate["swing_2_fib_price"],
+                        "swing_2_dist_pct": candidate["swing_2_dist_pct"],
+                        "swing_2_a_time": candidate["swing_2_a_time"],
+                        "swing_2_b_time": candidate["swing_2_b_time"],
+                        "reference_id": reference_id,
+                        "volume_24h_usdt": round(float(vol_24h), 2) if vol_24h is not None else None,
+                    }
+                    watchlist_results.append(watch)
+                    log_signal(
+                        f"👀  [İzleme] {symbol:<16} | toplam_mesafe=%{watch['combined_dist_pct']} | "
+                        f"trend={trend} (momentum={momentum}) | rsi_oversold={watch['rsi_oversold']}"
+                    )
 
         time.sleep(PAUSE_SEC)
 
@@ -920,7 +753,7 @@ def run_scanner():
     log_status(f"\n{'─'*65}")
     log_status(f"  Veri yetersiz  : {skipped_data}")
     log_status(f"  Kriter tutmadı (gate reddedildi) : {skipped_crit}")
-    log_status(f"  ✅  Eşleşen (Double Bottom — tek strateji): {len(validation_results)}")
+    log_status(f"  ✅  Eşleşen (Confluence — tek strateji): {len(validation_results)}")
 
     write_signal_outputs(validation_results, watchlist_results, skipped_data, skipped_crit, total)
     save_watchlist_state(watchlist_results)
@@ -928,38 +761,34 @@ def run_scanner():
     # ── İzleme Listesi CSV'si (0 sinyal olsa bile HER ZAMAN yazılır) ──
     if watchlist_results:
         watch_col_map = {
-            "symbol"            : "Sembol",
-            "trend"             : "Trend",
-            "momentum_pct"      : "Momentum (onceki tura gore)",
-            "missing_steps"     : "Eksik Adımlar",
-            "breakout_confirmed": "Kırılım Oldu mu",
-            "volume_ok"         : "Hacim Teyidi",
-            "rsi_divergence_ok" : "RSI Diverjans OK",
-            "in_fib_zone"       : "Fib Bandında mı",
-            "fib_distance_pct"  : "Fib Bandına Uzaklık%",
-            "fib_direction"     : "Yön",
-            "low1_price"        : "Dip1 Fiyatı",
-            "low1_time"         : "Dip1 Zamanı",
-            "low2_price"        : "Dip2 Fiyatı",
-            "low2_time"         : "Dip2 Zamanı",
-            "peak_mid"          : "Kırılım Seviyesi (Peak Mid)",
-            "fib_zone_low"      : "Fib Bandı Alt Sınır",
-            "fib_zone_high"     : "Fib Bandı Üst Sınır",
-            "swing_high"        : "Fib Bandı Kaynağı: Swing High",
-            "swing_high_time"   : "Swing High Zamanı",
-            "swing_low"         : "Fib Bandı Kaynağı: Swing Low",
-            "swing_low_time"    : "Swing Low Zamanı",
-            "volume_24h_usdt"   : "24s Hacim (USDT)",
+            "symbol"              : "Sembol",
+            "trend"                : "Trend",
+            "momentum_pct"         : "Momentum (önceki tura göre)",
+            "combined_dist_pct"    : "Toplam Mesafe%",
+            "current_rsi"          : "Güncel RSI",
+            "rsi_oversold"         : "RSI Oversold mu",
+            "swing_1_window_days"  : "Swing1 Pencere (gün)",
+            "swing_1_fib_ratio"    : "Swing1 Fib Oranı",
+            "swing_1_fib_price"    : "Swing1 Fib Fiyatı",
+            "swing_1_dist_pct"     : "Swing1 Uzaklık%",
+            "swing_1_a_time"       : "Swing1 A Zamanı",
+            "swing_1_b_time"       : "Swing1 B Zamanı",
+            "swing_2_window_days"  : "Swing2 Pencere (gün)",
+            "swing_2_fib_ratio"    : "Swing2 Fib Oranı",
+            "swing_2_fib_price"    : "Swing2 Fib Fiyatı",
+            "swing_2_dist_pct"     : "Swing2 Uzaklık%",
+            "swing_2_a_time"       : "Swing2 A Zamanı",
+            "swing_2_b_time"       : "Swing2 B Zamanı",
+            "volume_24h_usdt"      : "24s Hacim (USDT)",
         }
         df_watch = pd.DataFrame(watchlist_results)
         df_watch = df_watch[[c for c in watch_col_map if c in df_watch.columns]]
         df_watch = df_watch.rename(columns=watch_col_map)
-        # "iyilesiyor" trendindekiler once, sonra eksik adim sayisina gore
+        # "iyilesiyor" trendindekiler once, sonra toplam mesafeye gore
         trend_rank = {"iyilesiyor": 3, "yeni": 1, "sabit": 1, "referans_degisti": 1, "kotulesiyor": 0}
         df_watch["_trend_rank"] = df_watch["Trend"].map(trend_rank)
-        df_watch["_eksik_sayisi"] = df_watch["Eksik Adımlar"].apply(len)
-        df_watch = df_watch.sort_values(["_trend_rank", "_eksik_sayisi"], ascending=[False, True])
-        df_watch = df_watch.drop(columns=["_trend_rank", "_eksik_sayisi"]).reset_index(drop=True)
+        df_watch = df_watch.sort_values(["_trend_rank", "Toplam Mesafe%"], ascending=[False, True])
+        df_watch = df_watch.drop(columns=["_trend_rank"]).reset_index(drop=True)
 
         if EXPORT_CSV:
             watch_fn = "okx_watchlist.csv"
@@ -967,36 +796,42 @@ def run_scanner():
             log_status(f"👀  CSV (İzleme Listesi, {len(df_watch)} coin) → {watch_fn}")
 
     if not validation_results:
-        log_status("\n❌  Hiç aday bulunamadı (Double Bottom gate'ini geçen sinyal yok).")
+        log_status("\n❌  Hiç aday bulunamadı (Confluence gate'ini geçen sinyal yok).")
         return None
 
     # ── Tek birleşik sinyal CSV çıktısı ────────────────────────────────
     col_map = {
-        "symbol"                : "Sembol",
-        "confidence"             : "Güven",
-        "wyckoff_volume_ok"      : "Wyckoff Hacim Teyidi",
-        "motor3_fib_confluence"  : "Motor3 Fib Confluence",
-        "bonus_score"            : "Bonus Puan",
-        "bonus_notes"            : "Bonus Notları",
-        "reasons"                : "Notlar",
-        "stop_price"             : "Stop Fiyatı",
-        "position_size"          : "Pozisyon Büyüklüğü",
-        "fib_zone"               : "Fibo 0.618-0.786 Bandı",
-        "volume_24h_usdt"        : "24s Hacim (USDT)",
+        "symbol"                        : "Sembol",
+        "confidence"                     : "Güven",
+        "double_bottom_structure"        : "Double Bottom Yapısı Var mı",
+        "double_bottom_fully_confirmed"  : "Double Bottom Tam Teyitli mi",
+        "entry_price"                    : "Giriş Fiyatı",
+        "stop_price"                     : "Stop Fiyatı",
+        "position_size"                  : "Pozisyon Büyüklüğü",
+        "swing_1_window_days"            : "Swing1 Pencere (gün)",
+        "swing_1_fib_ratio"              : "Swing1 Fib Oranı",
+        "swing_1_fib_price"              : "Swing1 Fib Fiyatı",
+        "swing_1_dist_pct"               : "Swing1 Uzaklık%",
+        "swing_2_window_days"            : "Swing2 Pencere (gün)",
+        "swing_2_fib_ratio"              : "Swing2 Fib Oranı",
+        "swing_2_fib_price"              : "Swing2 Fib Fiyatı",
+        "swing_2_dist_pct"               : "Swing2 Uzaklık%",
+        "current_rsi"                    : "Güncel RSI",
+        "volume_24h_usdt"                : "24s Hacim (USDT)",
     }
 
     df_out = pd.DataFrame(validation_results)
     df_out = df_out[[c for c in col_map if c in df_out.columns]]
     df_out = df_out.rename(columns=col_map)
 
-    # Confidence kademesine göre sırala (high → medium → low), sonra bonus puanına göre
+    # Confidence kademesine göre sırala (high → medium → low)
     confidence_rank = {"high": 2, "medium": 1, "low": 0}
     df_out["_rank"] = df_out["Güven"].map(confidence_rank)
-    df_out = df_out.sort_values(["_rank", "Bonus Puan"], ascending=[False, False])
+    df_out = df_out.sort_values("_rank", ascending=False)
     df_out = df_out.drop(columns=["_rank"]).reset_index(drop=True)
 
     log_status(f"\n{'═'*65}")
-    log_status(f"  🎯  {len(df_out)} adet Double Bottom sinyali! (detaylar {SIGNALS_JSON} / {LOG_FILE} dosyalarında)\n")
+    log_status(f"  🎯  {len(df_out)} adet Confluence sinyali! (detaylar {SIGNALS_JSON} / {LOG_FILE} dosyalarında)\n")
 
     if EXPORT_CSV:
         fn = "okx_double_bottom_signals.csv"
@@ -1028,51 +863,50 @@ def debug_test_symbol(test_symbol, debug=True):
     log_status(f"   Son mum     : {df_t.index[-1]}")
     log_status(f"   Fiyat aralığı: {df_t['low'].min():.6f} – {df_t['high'].max():.6f}")
 
-    # ── Motor 1 / Motor 3: bonus & confidence girdileri ──────────────
     if debug:
-        log_status("\n── DEBUG: Motor 1 (A-B Fibonacci+ABC, bonus) — Zaman Aralığı Taraması ──")
-    ab_result_t = find_ab_fibonacci_signal(df_t, verbose=debug)
-    if debug:
-        log_status("\n── DEBUG: Motor 3 (Fib Confluence, confidence) — Zaman Aralığı Taraması ──")
-    fib_confluence_t = find_fib_confluence_signal(df_t, verbose=debug)
+        log_status("\n── DEBUG: Confluence Adayı Taraması (90/60/30 gün) ──")
+    candidate_t = find_confluence_candidates(df_t, verbose=debug)
 
-    swing_high = swing_low = None
-    if ab_result_t is not None:
-        swing_high = max(ab_result_t["a_price"], ab_result_t["b_price"])
-        swing_low  = min(ab_result_t["a_price"], ab_result_t["b_price"])
+    log_status("\n── SONUÇ: Confluence Gate (tek strateji) ──")
+    if candidate_t is None:
+        log_status("   ❌  En az 2 bağımsız swing bulunamadı — izleme listesine de girmiyor.")
+        return
 
-    # ── Motor 2: gerçek gate — asıl karar burada veriliyor ───────────
-    validation_t = evaluate_signal(
-        df_t, swing_high=swing_high, swing_low=swing_low,
-        fib_confluence_result=fib_confluence_t, ab_fibonacci_result=ab_result_t,
-    )
+    log_status(f"   Swing1: {candidate_t['swing_1_window_days']}g, {candidate_t['swing_1_fib_ratio']} → "
+               f"{candidate_t['swing_1_fib_price']} (Δ%{candidate_t['swing_1_dist_pct']})")
+    log_status(f"   Swing2: {candidate_t['swing_2_window_days']}g, {candidate_t['swing_2_fib_ratio']} → "
+               f"{candidate_t['swing_2_fib_price']} (Δ%{candidate_t['swing_2_dist_pct']})")
+    log_status(f"   Toplam mesafe: %{candidate_t['combined_dist_pct']} | within_tolerance={candidate_t['within_tolerance']}")
+    log_status(f"   RSI: {candidate_t['current_rsi']} | oversold={candidate_t['rsi_oversold']}")
 
-    log_status("\n── SONUÇ: Double Bottom Gate (tek strateji) ──")
-    for check_name, check_val in validation_t.checks.items():
-        log_status(f"   {check_name:<22}: {check_val}")
+    confluence_signal_t = evaluate_confluence_entry(df_t, candidate_t)
 
-    if validation_t.is_valid:
-        log_status(f"\n   ✅  SİNYAL GEÇERLİ — confidence={validation_t.confidence}")
-        log_status(f"      stop_price      : {validation_t.stop_price}")
-        log_status(f"      position_size   : {validation_t.position_size}")
-        log_status(f"      bonus_score     : {validation_t.bonus_score}")
-        log_status(f"      bonus_notes     : {validation_t.bonus_notes}")
+    if confluence_signal_t is not None:
+        log_status(f"\n   ✅  SİNYAL GEÇERLİ — confidence={confluence_signal_t['confidence']}")
+        log_status(f"      double_bottom_structure       : {confluence_signal_t['double_bottom_structure']}")
+        log_status(f"      double_bottom_fully_confirmed : {confluence_signal_t['double_bottom_fully_confirmed']}")
+        log_status(f"      entry_price : {confluence_signal_t['entry_price']}")
+        log_status(f"      stop_price  : {confluence_signal_t['stop_price']}")
+        log_status(f"      position_size: {confluence_signal_t['position_size']}")
     else:
-        log_status("\n   ❌  Gate reddedildi.")
-        log_status(f"      reasons: {validation_t.reasons}")
+        reasons = []
+        if not candidate_t.get("within_tolerance"):
+            reasons.append(f"Confluence tolerans dışı (toplam mesafe %{candidate_t['combined_dist_pct']})")
+        if not candidate_t.get("rsi_oversold"):
+            reasons.append(f"RSI oversold değil (RSI={candidate_t['current_rsi']})")
+        log_status(f"\n   ❌  Gate reddedildi. reasons={reasons}")
 
-        watch_t = evaluate_watchlist(df_t, swing_high=swing_high, swing_low=swing_low)
-        if watch_t is not None:
-            log_status("\n   👀  İZLEME LİSTESİNDE — yapısal olarak yakın:")
-            for k, v in watch_t.items():
-                log_status(f"      {k:<22}: {v}")
+        if (not candidate_t["within_tolerance"]
+                and candidate_t["combined_dist_pct"] <= WATCHLIST_MAX_COMBINED_DIST_PCT):
+            log_status(f"\n   👀  İZLEME LİSTESİNDE — toplam mesafe %{candidate_t['combined_dist_pct']}, "
+                       f"tolerans sınırı %{WATCHLIST_MAX_COMBINED_DIST_PCT}")
         else:
-            log_status("\n   (İzleme listesine de girmiyor — dip yapısı yok veya çok uzak)")
+            log_status("\n   (İzleme listesine de girmiyor — çok uzak)")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="OKX Double Bottom + RSI Diverjans Tarayıcı (tek strateji, v3.0)"
+        description="OKX Fibonacci Confluence Tarayıcı (tek strateji, v4.0)"
     )
     parser.add_argument(
         "--test-symbol",
