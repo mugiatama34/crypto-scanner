@@ -1,12 +1,14 @@
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  OKX — FIBONACCI CONFLUENCE TARAYICI (tek strateji)                 ║
-# ║  4 Saatlik | v4.0 (2026-07-10 pivot: Confluence artık ana strateji)  ║
+# ║  4 Saatlik | v4.1 (2026-07-10: pivot-tabanlı swing tespiti)          ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 #
 # GATE (find_confluence_candidates + evaluate_confluence_entry, ikisi de zorunlu):
-#   1) İki BAĞIMSIZ swing'in (90/60/30 gün pencerelerinden) retracement/
-#      extension seviyeleri (0.618/0.786/1.272/1.618) güncel fiyatta
-#      AYRI AYRI ±%3 tolerans içinde çakışıyor (Boroden confluence)
+#   1) İki BAĞIMSIZ swing'in (find_zigzag_pivots ile fiyat yapısından
+#      bulunan gerçek dönüş noktalarından, TAKVIM PENCERESİNDEN DEĞİL)
+#      retracement/extension seviyeleri (0.618/0.786/1.272/1.618) güncel
+#      fiyatta AYRI AYRI ±%3 tolerans içinde ÇAPRAZ çakışıyor (bir swing
+#      retracement, diğeri extension - Boroden confluence)
 #   2) Güncel RSI < 35 (aşırı satım)
 #
 # CONFIDENCE (gate geçildikten sonra kademelendirir, gate'i etkilemez):
@@ -23,10 +25,12 @@
 # sınırın (WATCHLIST_MAX_COMBINED_DIST_PCT) altında olan confluence
 # adayları, önceki tura göre yaklaşıyor/uzaklaşıyor bilgisiyle raporlanır.
 #
-# NOT: Önceki mimaride (v3.0) Double Bottom ana gate, Confluence bonus
-# katmanıydı. Kullanıcı tercihiyle 2026-07-10'da bu ilişki TERSİNE
-# ÇEVRİLDİ. Motor 1 (A-B Fibonacci + ABC uzantısı, tek swing) tamamen
-# kaldırıldı - confluence zaten onun daha güçlü (2 bağımsız swing) hali.
+# NOT (v4.0→v4.1): İlk confluence sürümü 90/60/30 günlük takvim
+# pencereleri kullanıyordu. Canlı veri, bu pencerelerin çoğu zaman AYNI
+# güncel ekstremumu paylaştığını (gerçek bağımsızlık yok) gösterdi -
+# reddedilenlerin %55'i bu yüzdendi. v4.1, swing tespitini fiyatın kendi
+# yerel dönüş noktalarına (ZigZag pivot) taşıyarak bunu kaynağından
+# çözdü.
 #
 # Bağımlılıklar için requirements.txt dosyasına bakın.
 # Çalıştırma:
@@ -205,12 +209,10 @@ def timeframe_to_candles_per_day(timeframe):
 CANDLES_PER_DAY = timeframe_to_candles_per_day(TIMEFRAME)
 
 # ── ZAMAN ARALIĞI ÖNCELİKLENDİRME ────────────────────────────────────
-# Uzun aralıktan kısaya doğru denenir; ilk eşleşme bulunan aralıkta durulur.
-# NOT: 15/7/3 gün pencereleri kaldırıldı (2026-07 refactor). Gerekçe: 3g=18
-# mum, 7g=42 mum gibi kısa pencereler RSI'nin (14 periyot) ısınma süresine
-# zar zor yetiyor ve Motor 3'ün (Fib Confluence) "bağımsız, yapısal olarak
-# anlamlı swing" varsayımını zayıflatarak gürültüyü artırıyordu.
-TIME_WINDOWS_DAYS = [90, 60, 30]
+# NOT: Takvim pencereleri (90/60/30 gün) 2026-07-10'da kaldırıldı - swing
+# tespiti artık ZIGZAG_PCT_THRESHOLD ile fiyat yapısından yapılıyor
+# (bkz. find_zigzag_pivots). Gerekçe: iç içe pencereler çoğu zaman aynı
+# güncel ekstremumu paylaşıyor, "bağımsız" swing üretmiyordu.
 
 # ── RSI ──────────────────────────────────────────────────────────────
 RSI_PERIOD       = 14
@@ -239,6 +241,14 @@ RSI_OVERSOLD_THRESHOLD   = 35
 # gurultuyu elemek icin makul bir tavan.
 WATCHLIST_MAX_COMBINED_DIST_PCT = float(os.environ.get("WATCHLIST_MAX_COMBINED_DIST_PCT", 16.0))
 
+# ── PIVOT TESPITI (2026-07-10, 2. pivot: takvim pencereleri yerine
+#    gercek fiyat yapisindan swing tespiti) ────────────────────────────
+# Fiyat, mevcut ekstremden bu yuzde kadar ters yone hareket edince bir
+# pivot (donus noktasi) onaylanir. 4H kripto icin %5 makul bir baslangic -
+# cok kucuk (%1-2) gurultuyu pivot sanar, cok buyuk (%15+) neredeyse hic
+# pivot bulamaz.
+ZIGZAG_PCT_THRESHOLD = float(os.environ.get("ZIGZAG_PCT_THRESHOLD", 0.05))
+
 # ── DİĞER ────────────────────────────────────────────────────────────
 PAUSE_SEC        = 0.22
 EXPORT_CSV       = True
@@ -260,9 +270,9 @@ def is_stablecoin_pair(symbol):
 
 
 def log_settings():
-    log_status("✅  Ayarlar yüklendi — OKX Confluence Tarayıcı v4.0 (Double Bottom = bonus katmanı)")
+    log_status("✅  Ayarlar yüklendi — OKX Confluence Tarayıcı v4.1 (pivot-tabanlı) (Double Bottom = bonus katmanı)")
     log_status(f"   Zaman Dilimi     : {TIMEFRAME}")
-    log_status(f"   Zaman Aralıkları : {', '.join(str(d) + 'g' for d in TIME_WINDOWS_DAYS)} (önce uzun, sonra kısa)")
+    log_status(f"   Pivot Tespiti    : ZigZag ±%{ZIGZAG_PCT_THRESHOLD*100:.0f} (takvim penceresi değil, fiyat yapısından)")
     log_status(f"   Confluence       : Fib seviyeleri={FIB_CONFLUENCE_LEVELS}, tolerans=±%{FIB_CONFLUENCE_TOLERANCE*100:.0f}, RSI oversold<{RSI_OVERSOLD_THRESHOLD}")
     log_status(f"   İzleme sınırı    : toplam mesafe ≤ %{WATCHLIST_MAX_COMBINED_DIST_PCT:.0f}")
 
@@ -339,6 +349,75 @@ def compute_fib_levels(a_price, b_price, a_type, ratios):
     return levels
 
 
+def find_zigzag_pivots(df, pct_threshold=ZIGZAG_PCT_THRESHOLD):
+    """
+    Fiyat serisinden GERÇEK yerel dönüş noktalarını (pivot high/low) bulur.
+    Klasik "ZigZag" mantığı: mevcut yönde yeni bir ekstrem oluştukça takip
+    eder, fiyat ekstremden `pct_threshold` kadar ters yöne hareket edince
+    bir pivot onaylanır ve yön değişir. Bu, takvim pencereleri (90/60/30
+    gün) yerine fiyatın kendi yapısından gelen, doğası gereği birbirinden
+    AYRIŞAN (farklı A/B noktalarına sahip) swing adayları üretir.
+
+    Dönüş: kronolojik sırayla pivot noktaları listesi:
+      [{"time": Timestamp, "price": float, "type": "dip"|"zirve"}, ...]
+    """
+    if len(df) < 3:
+        return []
+
+    highs = df["high"].values
+    lows = df["low"].values
+    times = df.index
+
+    pivots = []
+    trend = None  # henuz belirlenmedi
+    extreme_idx = 0
+    extreme_price = df["close"].iloc[0]
+
+    for i in range(1, len(df)):
+        high_i, low_i = highs[i], lows[i]
+
+        if trend is None:
+            if high_i >= extreme_price * (1 + pct_threshold):
+                trend = "up"
+                extreme_idx, extreme_price = i, high_i
+            elif low_i <= extreme_price * (1 - pct_threshold):
+                trend = "down"
+                extreme_idx, extreme_price = i, low_i
+            continue
+
+        if trend == "up":
+            if high_i > extreme_price:
+                extreme_idx, extreme_price = i, high_i
+            elif low_i <= extreme_price * (1 - pct_threshold):
+                pivots.append({"time": times[extreme_idx], "price": float(extreme_price), "type": "zirve"})
+                trend = "down"
+                extreme_idx, extreme_price = i, low_i
+        else:  # trend == "down"
+            if low_i < extreme_price:
+                extreme_idx, extreme_price = i, low_i
+            elif high_i >= extreme_price * (1 + pct_threshold):
+                pivots.append({"time": times[extreme_idx], "price": float(extreme_price), "type": "dip"})
+                trend = "up"
+                extreme_idx, extreme_price = i, high_i
+
+    # Su an olusmakta olan (henuz reversal ile onaylanmamis) son ekstrem de
+    # eklenir - en guncel, "canli" swing ucu olarak kullanilabilir.
+    if trend is not None:
+        pivots.append({
+            "time": times[extreme_idx], "price": float(extreme_price),
+            "type": "zirve" if trend == "up" else "dip",
+        })
+
+    if pivots:
+        # Baslangic ankraji: ilk onaylanan pivotun ZIT tipinde, serinin ilk
+        # barindan. Bu, ilk swing'in (baslangic -> ilk pivot) de bir aday
+        # olarak degerlendirilmesini saglar.
+        first_type = "dip" if pivots[0]["type"] == "zirve" else "zirve"
+        pivots.insert(0, {"time": times[0], "price": float(df["close"].iloc[0]), "type": first_type})
+
+    return pivots
+
+
 def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
     """
     ══════════════════════════════════════════════════════════════
@@ -346,13 +425,14 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
     kaynagi. Eskiden "Motor 3 / Sinyal Tipi B" adiyla sadece bonus
     puan veren bagimsiz bir tarayiciydi; artik stratejinin merkezi.)
 
-    MANTIK (Boroden confluence teorisi):
-      1) TIME_WINDOWS_DAYS (90/60/30 gun) pencerelerinin her biri kendi
-         A-B swing'ini uretir. Farkli zaman olceklerinden gelen bu uclar
-         "bagimsiz swing" adayidir - ama GERCEK bagimsizlik icin iki
-         swing'in HEM A HEM B noktalari birbirinden FARKLI olmali (sadece
-         B'nin ayni olmasi -ornegin ayni guncel tepe/dip iki farkli
-         pencerede de "son uc" olarak secilirse- bagimsiz sayilmaz).
+    MANTIK (Boroden confluence teorisi, 2026-07-10 2. revizyon - pivot bazlı):
+      1) find_zigzag_pivots ile fiyat serisinin kendi yerel dönüş
+         noktaları (pivot high/low) bulunur - takvim pencereleri (90/60/
+         30 gün) DEĞİL. Ardışık her pivot çifti bir "bacak" (swing)
+         oluşturur. GERÇEK bağımsızlık için iki bacağın HEM A HEM B
+         noktaları birbirinden FARKLI olmalı (bitişik bacaklar bir uç
+         paylaştığı için otomatik elenir - pairing döngüsünde kontrol
+         edilir).
       2) Her swing icin retracement (0.618/0.786) VE extension (1.272/
          1.618) seviyeleri hesaplanir.
       3) SADECE CAPRAZ eslesme aranir: bir swing'in RETRACEMENT seviyesi,
@@ -391,46 +471,29 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
     if pd.isna(current_rsi):
         return None, "rsi_hesaplanamiyor"
 
+    pivots = find_zigzag_pivots(df)
+    if verbose:
+        for p in pivots:
+            log_status(f"   [Pivot] {p['time']} {p['type']:<6} {p['price']:.6f}")
+
     swings = []
-    for window_days in TIME_WINDOWS_DAYS:
-        window_candles = window_days * CANDLES_PER_DAY
-        if len(df) < window_candles:
-            continue
-
-        window = df.iloc[-window_candles:]
-        confirmed_window = window.iloc[:-1]
-        if len(confirmed_window) < 2:
-            continue
-
-        high_time = confirmed_window["high"].idxmax()
-        low_time  = confirmed_window["low"].idxmin()
-        if high_time == low_time:
-            continue
-
-        high_price = window["high"][high_time]
-        low_price  = window["low"][low_time]
-
-        if low_time < high_time:
-            a_time, a_price, a_type = low_time, low_price, "dip"
-            b_time, b_price, b_type = high_time, high_price, "zirve"
-        else:
-            a_time, a_price, a_type = high_time, high_price, "zirve"
-            b_time, b_price, b_type = low_time, low_price, "dip"
+    for k in range(len(pivots) - 1):
+        p_a, p_b = pivots[k], pivots[k + 1]
+        a_time, a_price, a_type = p_a["time"], p_a["price"], p_a["type"]
+        b_time, b_price, b_type = p_b["time"], p_b["price"], p_b["type"]
 
         if abs(b_price - a_price) <= 0:
-            continue
-
-        if any(sw["a_time"] == a_time and sw["b_time"] == b_time for sw in swings):
-            if verbose:
-                log_status(f"   [Confluence] pencere={window_days}g atlandı → aynı A-B çifti (bağımsız değil)")
             continue
 
         levels = compute_fib_levels(a_price, b_price, a_type, FIB_CONFLUENCE_LEVELS)
         if any(lv <= 0 for lv in levels.values()):
             continue
 
+        duration_bars = df.index.get_loc(b_time) - df.index.get_loc(a_time)
+
         swings.append({
-            "window_days": window_days,
+            "leg_id": k,
+            "duration_bars": int(duration_bars),
             "a_type": a_type, "a_price": a_price, "a_time": a_time,
             "b_type": b_type, "b_price": b_price, "b_time": b_time,
             "levels": levels,
@@ -438,12 +501,12 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
 
         if verbose:
             level_str = ", ".join(f"{r}={v:.6f}" for r, v in levels.items())
-            log_status(f"   [Confluence] pencere={window_days}g A({a_type})={a_price:.6f} B({b_type})={b_price:.6f} → {level_str}")
+            log_status(f"   [Confluence] bacak={k} A({a_type})={a_price:.6f} B({b_type})={b_price:.6f} ({duration_bars} bar) → {level_str}")
 
     if len(swings) < 2:
         if verbose:
-            log_status("   [Confluence] atlandı → en az 2 geçerli pencere swing'i bulunamadı (veri yetersiz)")
-        return None, "yetersiz_pencere"
+            log_status("   [Confluence] atlandı → en az 2 pivot bacağı bulunamadı (fiyat hareketi yetersiz)")
+        return None, "yetersiz_pivot"
 
     independent_pair_exists = False
     best_match = None
@@ -462,7 +525,7 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
             if shares_a_point:
                 if verbose:
                     log_status(
-                        f"   [Confluence] {swing_i['window_days']}g × {swing_j['window_days']}g atlandı "
+                        f"   [Confluence] bacak{swing_i['leg_id']} × bacak{swing_j['leg_id']} atlandı "
                         f"→ ortak nokta paylaşıyorlar (gerçekten bağımsız değil)"
                     )
                 continue
@@ -518,7 +581,8 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
         "current_price"        : round(float(current_price), 6),
         "current_rsi"          : round(float(current_rsi), 2),
         "rsi_oversold"          : bool(current_rsi < RSI_OVERSOLD_THRESHOLD),
-        "swing_1_window_days"   : swing_i["window_days"],
+        "swing_1_leg_id"         : swing_i["leg_id"],
+        "swing_1_duration_bars"  : swing_i["duration_bars"],
         "swing_1_a_type"        : swing_i["a_type"],
         "swing_1_a_price"       : round(float(swing_i["a_price"]), 6),
         "swing_1_a_time"        : swing_i["a_time"].isoformat(),
@@ -528,7 +592,8 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
         "swing_1_fib_ratio"     : best_match["ratio_i"],
         "swing_1_fib_price"     : round(float(best_match["level_i"]), 6),
         "swing_1_dist_pct"      : round(float(best_match["dist_i"]) * 100, 3),
-        "swing_2_window_days"   : swing_j["window_days"],
+        "swing_2_leg_id"         : swing_j["leg_id"],
+        "swing_2_duration_bars"  : swing_j["duration_bars"],
         "swing_2_a_type"        : swing_j["a_type"],
         "swing_2_a_price"       : round(float(swing_j["a_price"]), 6),
         "swing_2_a_time"        : swing_j["a_time"].isoformat(),
@@ -598,11 +663,13 @@ def evaluate_confluence_entry(df, candidate, equity=1000, risk_pct=0.015):
         "entry_price": round(float(entry_price), 6),
         "stop_price": round(float(risk_calc["stop_price"]), 6),
         "position_size": round(float(position_size), 6),
-        "swing_1_window_days": candidate["swing_1_window_days"],
+        "swing_1_leg_id": candidate["swing_1_leg_id"],
+        "swing_1_duration_bars": candidate["swing_1_duration_bars"],
         "swing_1_fib_ratio": candidate["swing_1_fib_ratio"],
         "swing_1_fib_price": candidate["swing_1_fib_price"],
         "swing_1_dist_pct": candidate["swing_1_dist_pct"],
-        "swing_2_window_days": candidate["swing_2_window_days"],
+        "swing_2_leg_id": candidate["swing_2_leg_id"],
+        "swing_2_duration_bars": candidate["swing_2_duration_bars"],
         "swing_2_fib_ratio": candidate["swing_2_fib_ratio"],
         "swing_2_fib_price": candidate["swing_2_fib_price"],
         "swing_2_dist_pct": candidate["swing_2_dist_pct"],
@@ -632,7 +699,7 @@ def write_signal_outputs(validation_results, watchlist_results, skipped_data, sk
         "timeframe": TIMEFRAME,
         "strategy": "double_bottom_gate_v2 (2026-07 refactor: tek gate + confidence hiyerarsisi)",
         "parameters": {
-            "time_windows_days": TIME_WINDOWS_DAYS,
+            "zigzag_pct_threshold": ZIGZAG_PCT_THRESHOLD,
             "rsi_period": RSI_PERIOD,
             "fib_confluence_levels": FIB_CONFLUENCE_LEVELS,
             "fib_confluence_tolerance_pct": FIB_CONFLUENCE_TOLERANCE * 100,
@@ -751,7 +818,7 @@ def run_scanner():
             skipped_crit += 1
             if candidate is None:
                 reason_map = {
-                    "yetersiz_pencere": "En az 2 geçerli pencere swing'i bulunamadı (veri yetersiz)",
+                    "yetersiz_pivot": "En az 2 pivot bacağı bulunamadı (fiyat hareketi yetersiz)",
                     "tumu_ortak_nokta_paylasiyor": "Bulunan swing çiftlerinin TÜMÜ ortak nokta paylaşıyor (gerçekten bağımsız değil)",
                     "cok_uzak_veya_capraz_tip_yok": "Bağımsız çiftler var ama hiçbiri makul mesafede çapraz (retracement×extension) eşleşme vermiyor",
                     "rsi_hesaplanamiyor": "RSI henüz hesaplanamıyor (ısınma dönemi)",
@@ -785,13 +852,15 @@ def run_scanner():
                         "combined_dist_pct": candidate["combined_dist_pct"],
                         "current_rsi": candidate["current_rsi"],
                         "rsi_oversold": candidate["rsi_oversold"],
-                        "swing_1_window_days": candidate["swing_1_window_days"],
+                        "swing_1_leg_id": candidate["swing_1_leg_id"],
+        "swing_1_duration_bars": candidate["swing_1_duration_bars"],
                         "swing_1_fib_ratio": candidate["swing_1_fib_ratio"],
                         "swing_1_fib_price": candidate["swing_1_fib_price"],
                         "swing_1_dist_pct": candidate["swing_1_dist_pct"],
                         "swing_1_a_time": candidate["swing_1_a_time"],
                         "swing_1_b_time": candidate["swing_1_b_time"],
-                        "swing_2_window_days": candidate["swing_2_window_days"],
+                        "swing_2_leg_id": candidate["swing_2_leg_id"],
+        "swing_2_duration_bars": candidate["swing_2_duration_bars"],
                         "swing_2_fib_ratio": candidate["swing_2_fib_ratio"],
                         "swing_2_fib_price": candidate["swing_2_fib_price"],
                         "swing_2_dist_pct": candidate["swing_2_dist_pct"],
@@ -826,13 +895,15 @@ def run_scanner():
             "combined_dist_pct"    : "Toplam Mesafe%",
             "current_rsi"          : "Güncel RSI",
             "rsi_oversold"         : "RSI Oversold mu",
-            "swing_1_window_days"  : "Swing1 Pencere (gün)",
+            "swing_1_leg_id"        : "Swing1 Bacak No",
+            "swing_1_duration_bars" : "Swing1 Süre (bar)",
             "swing_1_fib_ratio"    : "Swing1 Fib Oranı",
             "swing_1_fib_price"    : "Swing1 Fib Fiyatı",
             "swing_1_dist_pct"     : "Swing1 Uzaklık%",
             "swing_1_a_time"       : "Swing1 A Zamanı",
             "swing_1_b_time"       : "Swing1 B Zamanı",
-            "swing_2_window_days"  : "Swing2 Pencere (gün)",
+            "swing_2_leg_id"        : "Swing2 Bacak No",
+            "swing_2_duration_bars" : "Swing2 Süre (bar)",
             "swing_2_fib_ratio"    : "Swing2 Fib Oranı",
             "swing_2_fib_price"    : "Swing2 Fib Fiyatı",
             "swing_2_dist_pct"     : "Swing2 Uzaklık%",
@@ -867,11 +938,13 @@ def run_scanner():
         "entry_price"                    : "Giriş Fiyatı",
         "stop_price"                     : "Stop Fiyatı",
         "position_size"                  : "Pozisyon Büyüklüğü",
-        "swing_1_window_days"            : "Swing1 Pencere (gün)",
+        "swing_1_leg_id"                  : "Swing1 Bacak No",
+        "swing_1_duration_bars"          : "Swing1 Süre (bar)",
         "swing_1_fib_ratio"              : "Swing1 Fib Oranı",
         "swing_1_fib_price"              : "Swing1 Fib Fiyatı",
         "swing_1_dist_pct"               : "Swing1 Uzaklık%",
-        "swing_2_window_days"            : "Swing2 Pencere (gün)",
+        "swing_2_leg_id"                  : "Swing2 Bacak No",
+        "swing_2_duration_bars"          : "Swing2 Süre (bar)",
         "swing_2_fib_ratio"              : "Swing2 Fib Oranı",
         "swing_2_fib_price"              : "Swing2 Fib Fiyatı",
         "swing_2_dist_pct"               : "Swing2 Uzaklık%",
@@ -931,9 +1004,9 @@ def debug_test_symbol(test_symbol, debug=True):
         log_status(f"   ❌  Aday bulunamadı — neden: {no_candidate_reason_t} — izleme listesine de girmiyor.")
         return
 
-    log_status(f"   Swing1: {candidate_t['swing_1_window_days']}g, {candidate_t['swing_1_fib_ratio']} → "
+    log_status(f"   Swing1: bacak{candidate_t['swing_1_leg_id']} ({candidate_t['swing_1_duration_bars']} bar), {candidate_t['swing_1_fib_ratio']} → "
                f"{candidate_t['swing_1_fib_price']} (Δ%{candidate_t['swing_1_dist_pct']})")
-    log_status(f"   Swing2: {candidate_t['swing_2_window_days']}g, {candidate_t['swing_2_fib_ratio']} → "
+    log_status(f"   Swing2: bacak{candidate_t['swing_2_leg_id']} ({candidate_t['swing_2_duration_bars']} bar), {candidate_t['swing_2_fib_ratio']} → "
                f"{candidate_t['swing_2_fib_price']} (Δ%{candidate_t['swing_2_dist_pct']})")
     log_status(f"   Toplam mesafe: %{candidate_t['combined_dist_pct']} | within_tolerance={candidate_t['within_tolerance']}")
     log_status(f"   RSI: {candidate_t['current_rsi']} | oversold={candidate_t['rsi_oversold']}")
@@ -965,7 +1038,7 @@ def debug_test_symbol(test_symbol, debug=True):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="OKX Fibonacci Confluence Tarayıcı (tek strateji, v4.0)"
+        description="OKX Fibonacci Confluence Tarayıcı (tek strateji, v4.1)"
     )
     parser.add_argument(
         "--test-symbol",
