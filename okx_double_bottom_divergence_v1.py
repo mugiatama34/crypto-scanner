@@ -250,7 +250,7 @@ def is_stablecoin_pair(symbol):
 
 
 def log_settings():
-    log_status("✅  Ayarlar yüklendi — OKX Confluence Tarayıcı v3.0 (Double Bottom = bonus katmanı)")
+    log_status("✅  Ayarlar yüklendi — OKX Confluence Tarayıcı v4.0 (Double Bottom = bonus katmanı)")
     log_status(f"   Zaman Dilimi     : {TIMEFRAME}")
     log_status(f"   Zaman Aralıkları : {', '.join(str(d) + 'g' for d in TIME_WINDOWS_DAYS)} (önce uzun, sonra kısa)")
     log_status(f"   Confluence       : Fib seviyeleri={FIB_CONFLUENCE_LEVELS}, tolerans=±%{FIB_CONFLUENCE_TOLERANCE*100:.0f}, RSI oversold<{RSI_OVERSOLD_THRESHOLD}")
@@ -560,6 +560,7 @@ def evaluate_confluence_entry(df, candidate, equity=1000, risk_pct=0.015):
 
 
 
+def _json_default(obj):
     """json.dump için numpy/pandas tiplerini native Python tiplerine çevirir."""
     if isinstance(obj, np.integer):
         return int(obj)
