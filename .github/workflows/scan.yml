@@ -37,8 +37,7 @@ jobs:
           path: |
             signals.json
             signals.log
-            okx_ab_fibonacci_signals.csv
             okx_double_bottom_signals.csv
-            okx_fib_confluence_signals.csv
+            okx_watchlist.csv
           if-no-files-found: ignore
           retention-days: 30
