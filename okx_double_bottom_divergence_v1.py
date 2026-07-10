@@ -220,7 +220,17 @@ RSI_PERIOD       = 14
 # 1.272/1.618) güncel fiyatta çakışıyor mu + RSI aşırı satımda mı
 # kontrol eder. find_confluence_candidates ana gate'in TEK kaynağıdır;
 # Double Bottom (signal_validation.py) artık sadece confidence katmanı.
-FIB_CONFLUENCE_LEVELS    = [0.618, 0.786, 1.272, 1.618]
+#
+# 2026-07-10 (2. revizyon): confluence artık SADECE retracement-extension
+# CAPRAZ eslesmesi ariyor (bir swing'in 0.618/0.786'si, BASKA bir swing'in
+# 1.272/1.618'i ile cakisiyor mu) - iki retracement veya iki extension'in
+# kendi aralarinda cakismasi confluence sayilmiyor. Ayrica iki swing'in
+# HEM baslangic (A) HEM bitis (B) noktalari birbirinden farkli olmali -
+# sadece biri farkliysa (ornegin ayni B, farkli A) gercekten bagimsiz
+# sayilmiyor.
+RETRACEMENT_RATIOS      = [0.618, 0.786]
+EXTENSION_RATIOS        = [1.272, 1.618]
+FIB_CONFLUENCE_LEVELS    = RETRACEMENT_RATIOS + EXTENSION_RATIOS
 FIB_CONFLUENCE_TOLERANCE = float(os.environ.get("FIB_CONFLUENCE_TOLERANCE", 0.03))
 RSI_OVERSOLD_THRESHOLD   = 35
 # Izleme listesi: gate'i (within_tolerance) tam gecemeyen ama toplam mesafesi
@@ -339,12 +349,19 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
     MANTIK (Boroden confluence teorisi):
       1) TIME_WINDOWS_DAYS (90/60/30 gun) pencerelerinin her biri kendi
          A-B swing'ini uretir. Farkli zaman olceklerinden gelen bu uclar
-         "bagimsiz swing" olarak ele alinir (yaklasimdir, gercek ardisik
-         pivot taramasi degildir). Ayni A-B ciftini tekrar sayan pencereler
-         atlanir.
-      2) Her swing icin retracement VE extension seviyeleri hesaplanir
-         (FIB_CONFLUENCE_LEVELS = 0.618, 0.786, 1.272, 1.618).
-      3) TUM olasi (swing_i, swing_j, ratio_i, ratio_j) kombinasyonlari
+         "bagimsiz swing" adayidir - ama GERCEK bagimsizlik icin iki
+         swing'in HEM A HEM B noktalari birbirinden FARKLI olmali (sadece
+         B'nin ayni olmasi -ornegin ayni guncel tepe/dip iki farkli
+         pencerede de "son uc" olarak secilirse- bagimsiz sayilmaz).
+      2) Her swing icin retracement (0.618/0.786) VE extension (1.272/
+         1.618) seviyeleri hesaplanir.
+      3) SADECE CAPRAZ eslesme aranir: bir swing'in RETRACEMENT seviyesi,
+         BASKA bir (A ve B'si farkli) swing'in EXTENSION seviyesiyle
+         cakisiyor mu. Iki retracement'in veya iki extension'in kendi
+         aralarinda cakismasi confluence SAYILMAZ - WIF/TRX ornegindeki
+         gercek confluence deseni budur (bir swing'in geri cekilme
+         bolgesi, baska bir swing'in projeksiyon hedefiyle ortusuyor).
+      4) TUM gecerli (swing_i, swing_j, ratio_i, ratio_j) kombinasyonlari
          arasindan, guncel fiyata TOPLAM mesafesi (dist_i + dist_j) en
          kucuk olan cift secilir - toleransin icinde olsun ya da olmasin.
          Bu, hem GATE (tam eslesme) hem WATCHLIST (yaklasan ama henuz
@@ -432,6 +449,23 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
     for i in range(len(swings)):
         for j in range(i + 1, len(swings)):
             swing_i, swing_j = swings[i], swings[j]
+
+            # Gercek bagimsizlik: HEM A HEM B noktalari farkli olmali.
+            # Sadece biri (ozellikle guncel/son ekstremum olan B) ortaksa
+            # bu iki swing gercekte bagimsiz degil - ayni referans noktasina
+            # dayanan farkli boy olcumleri, gercek "iki ayri swing" degil.
+            shares_a_point = (
+                swing_i["a_time"] == swing_j["a_time"] or swing_i["a_time"] == swing_j["b_time"]
+                or swing_i["b_time"] == swing_j["a_time"] or swing_i["b_time"] == swing_j["b_time"]
+            )
+            if shares_a_point:
+                if verbose:
+                    log_status(
+                        f"   [Confluence] {swing_i['window_days']}g × {swing_j['window_days']}g atlandı "
+                        f"→ ortak nokta paylaşıyorlar (gerçekten bağımsız değil)"
+                    )
+                continue
+
             for ratio_i, level_i in swing_i["levels"].items():
                 dist_i = abs(current_price - level_i) / level_i
                 # cok uzak (watch_tolerance'in cok disinda) kombinasyonlari
@@ -440,6 +474,14 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
                 if dist_i > watch_tolerance * 2:
                     continue
                 for ratio_j, level_j in swing_j["levels"].items():
+                    # SADECE CAPRAZ eslesme: biri retracement biri extension
+                    # olmali. Iki retracement veya iki extension'in kendi
+                    # aralarinda cakismasi confluence sayilmaz.
+                    i_is_retracement = ratio_i in RETRACEMENT_RATIOS
+                    j_is_retracement = ratio_j in RETRACEMENT_RATIOS
+                    if i_is_retracement == j_is_retracement:
+                        continue
+
                     dist_j = abs(current_price - level_j) / level_j
                     if dist_j > watch_tolerance * 2:
                         continue
