@@ -88,7 +88,8 @@ class SignalResult:
 
 def check_double_bottom(df: pd.DataFrame, min_bar_gap: int = 8,
                          level_tolerance: float = 0.05,
-                         volume_breakout_mult: float = 1.3) -> dict:
+                         volume_breakout_mult: float = 1.3,
+                         breakout_window: int = 3) -> dict:
     closes = df["close"]
     lows = find_local_lows(df["low"], order=3)
 
@@ -108,12 +109,30 @@ def check_double_bottom(df: pd.DataFrame, min_bar_gap: int = 8,
     mid_slice = df.iloc[low1_idx:low2_idx + 1]
     peak_mid = mid_slice["high"].max()
 
-    last_close = closes.iloc[-1]
-    breakout_confirmed = last_close > peak_mid  # kapanis bazli, fitil degil
-
     avg_vol_20 = df["volume"].iloc[-21:-1].mean()
-    last_vol = df["volume"].iloc[-1]
-    volume_ok = last_vol > avg_vol_20 * volume_breakout_mult
+
+    # 2026-07-10: tek bara (sadece en son mum) bakmak yerine, son
+    # `breakout_window` bar icinde kirilim + hacim spike'inin AYNI barda
+    # cakismasi araniyor. Gerekce: canli tarama verisi kirilim ve hacim
+    # artisinin cogunlukla ayni ana denk gelmedigini gosterdi (19/50 coin
+    # bu yuzden eleniyordu) - bu bir esik sorunu degil, zamanlama penceresi
+    # sorunuydu. En yakin (en guncel) eslesme tercih edilir.
+    breakout_confirmed = False
+    volume_ok = False
+    breakout_bars_ago = None
+    for offset in range(1, breakout_window + 1):
+        bar = df.iloc[-offset]
+        if bar["close"] <= peak_mid:
+            continue
+        vol_ok_this_bar = bar["volume"] > avg_vol_20 * volume_breakout_mult
+        if not breakout_confirmed:
+            breakout_confirmed = True
+            volume_ok = vol_ok_this_bar
+            breakout_bars_ago = offset
+        if vol_ok_this_bar:
+            volume_ok = True
+            breakout_bars_ago = offset
+            break
 
     passed = breakout_confirmed and volume_ok
     return {
@@ -123,6 +142,7 @@ def check_double_bottom(df: pd.DataFrame, min_bar_gap: int = 8,
         "peak_mid": peak_mid,
         "breakout_confirmed": breakout_confirmed,
         "volume_ok": volume_ok,
+        "breakout_bars_ago": breakout_bars_ago,
         "reason": None if passed else "Kirilim teyidi veya hacim kosulu saglanmadi",
     }
 
