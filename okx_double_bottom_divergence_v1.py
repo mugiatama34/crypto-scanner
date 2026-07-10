@@ -50,7 +50,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from signal_validation import evaluate_signal
+from signal_validation import evaluate_signal, evaluate_watchlist
 
 warnings.filterwarnings("ignore")
 
@@ -674,12 +674,9 @@ def validation_result_to_dict(symbol, validation, volume_24h_usdt=None):
     }
 
 
-def write_signal_outputs(validation_results, skipped_data, skipped_crit, total_scanned):
-    """Bulunan sinyalleri (tek strateji: Double Bottom gate) signals.json /
-    signals.log dosyalarına yazar. Motor 1 ve Motor 3, evaluate_signal()
-    içine bonus/confidence girdisi olarak gömüldüğü için burada ayrı bir
-    sinyal listesi olarak görünmezler; validation_results'ın
-    bonus_notes / motor3_fib_confluence alanlarında izleri kalır."""
+def write_signal_outputs(validation_results, watchlist_results, skipped_data, skipped_crit, total_scanned):
+    """Bulunan sinyalleri (tek strateji: Double Bottom gate) VE izleme
+    listesini signals.json / signals.log dosyalarına yazar."""
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "timeframe": TIMEFRAME,
@@ -696,8 +693,10 @@ def write_signal_outputs(validation_results, skipped_data, skipped_crit, total_s
             "skipped_no_data": skipped_data,
             "skipped_gate_rejected": skipped_crit,
             "matched": len(validation_results),
+            "watchlist": len(watchlist_results),
         },
         "signals": validation_results,
+        "watchlist": watchlist_results,
     }
 
     with open(SIGNALS_JSON, "w", encoding="utf-8") as f:
@@ -759,6 +758,7 @@ def run_scanner():
     # başlarına sonuç biriktirmiyor — evaluate_signal() içine bonus/confidence
     # girdisi olarak akıyorlar. Tek gerçek sinyal listesi: validation_results.
     validation_results = []
+    watchlist_results   = []
     skipped_data        = 0
     skipped_crit         = 0
 
@@ -806,6 +806,20 @@ def run_scanner():
             skipped_crit += 1
             log_signal(f"ℹ️  [Double Bottom Validation] {symbol:<16} reddedildi | reasons={validation.reasons}")
 
+            # Gate'i tam gecemedi ama yapisal olarak yakinsa izleme listesine al.
+            # Bu ISLEM TETIKLEMEZ, sadece "yaklasiyor" bilgisi tasir.
+            watch = evaluate_watchlist(df, swing_high=swing_high, swing_low=swing_low)
+            if watch is not None:
+                watch["symbol"] = symbol
+                watch["volume_24h_usdt"] = round(float(vol_24h), 2) if vol_24h is not None else None
+                watchlist_results.append(watch)
+                log_signal(
+                    f"👀  [Izleme] {symbol:<16} | eksik={watch['missing_steps']} | "
+                    f"fib_mesafe=%{watch['fib_distance_pct']} ({watch['fib_direction']})"
+                    if not watch["in_fib_zone"] else
+                    f"👀  [Izleme] {symbol:<16} | eksik={watch['missing_steps']} | fib bandinin icinde"
+                )
+
         # Motor 1 / Motor 3 ham çıktıları artık bağımsız CSV üretmiyor;
         # sadece evaluate_signal() içine bonus/confidence girdisi olarak
         # geçildiler (yukarıda). Burada ayrıca biriktirilmelerine gerek yok.
@@ -818,7 +832,7 @@ def run_scanner():
     log_status(f"  Kriter tutmadı (gate reddedildi) : {skipped_crit}")
     log_status(f"  ✅  Eşleşen (Double Bottom — tek strateji): {len(validation_results)}")
 
-    write_signal_outputs(validation_results, skipped_data, skipped_crit, total)
+    write_signal_outputs(validation_results, watchlist_results, skipped_data, skipped_crit, total)
 
     if not validation_results:
         log_status("\n❌  Hiç aday bulunamadı (Double Bottom gate'ini geçen sinyal yok).")
@@ -856,6 +870,33 @@ def run_scanner():
         fn = "okx_double_bottom_signals.csv"
         df_out.to_csv(fn, index=False, encoding="utf-8-sig")
         log_status(f"💾  CSV → {fn}")
+
+    # ── İzleme Listesi CSV'si ─────────────────────────────────────────
+    if watchlist_results:
+        watch_col_map = {
+            "symbol"            : "Sembol",
+            "missing_steps"     : "Eksik Adımlar",
+            "breakout_confirmed": "Kırılım Oldu mu",
+            "volume_ok"         : "Hacim Teyidi",
+            "rsi_divergence_ok" : "RSI Diverjans OK",
+            "in_fib_zone"       : "Fib Bandında mı",
+            "fib_distance_pct"  : "Fib Bandına Uzaklık%",
+            "fib_direction"     : "Yön",
+            "low1_price"        : "Dip1 Fiyatı",
+            "low2_price"        : "Dip2 Fiyatı",
+            "volume_24h_usdt"   : "24s Hacim (USDT)",
+        }
+        df_watch = pd.DataFrame(watchlist_results)
+        df_watch = df_watch[[c for c in watch_col_map if c in df_watch.columns]]
+        df_watch = df_watch.rename(columns=watch_col_map)
+        # En az eksik adımı olanlar (tetiklenmeye en yakın) önce
+        df_watch["_eksik_sayisi"] = df_watch["Eksik Adımlar"].apply(len)
+        df_watch = df_watch.sort_values("_eksik_sayisi").drop(columns=["_eksik_sayisi"])
+        df_watch = df_watch.reset_index(drop=True)
+
+        watch_fn = "okx_watchlist.csv"
+        df_watch.to_csv(watch_fn, index=False, encoding="utf-8-sig")
+        log_status(f"👀  CSV (İzleme Listesi, {len(df_watch)} coin) → {watch_fn}")
 
     return df_out
 
@@ -914,6 +955,14 @@ def debug_test_symbol(test_symbol, debug=True):
     else:
         log_status("\n   ❌  Gate reddedildi.")
         log_status(f"      reasons: {validation_t.reasons}")
+
+        watch_t = evaluate_watchlist(df_t, swing_high=swing_high, swing_low=swing_low)
+        if watch_t is not None:
+            log_status("\n   👀  İZLEME LİSTESİNDE — yapısal olarak yakın:")
+            for k, v in watch_t.items():
+                log_status(f"      {k:<22}: {v}")
+        else:
+            log_status("\n   (İzleme listesine de girmiyor — dip yapısı yok veya çok uzak)")
 
 
 def parse_args():
