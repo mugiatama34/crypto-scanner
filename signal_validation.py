@@ -70,6 +70,11 @@ class SignalResult:
     stop_price: float = None
     position_size: float = None
     fib_zone: tuple = None
+    # Motor 1 (A-B Fibonacci+ABC) ve Elliott sanity check'ten gelen ek puan.
+    # SADECE bilgi amacli / raporlama icindir; gate'i VEYA confidence
+    # kademesini ETKILEMEZ.
+    bonus_score: float = 0.0
+    bonus_notes: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +128,8 @@ def check_double_bottom(df: pd.DataFrame, min_bar_gap: int = 10,
 
 def check_rsi_divergence(df: pd.DataFrame, low1_idx: int, low2_idx: int,
                           oversold_threshold: float = 35,
-                          min_rsi_gap: float = 5) -> dict:
+                          min_rsi_gap: float = 5,
+                          min_bar_gap: int = 6) -> dict:
     rsi = compute_rsi(df["close"])
     rsi1, rsi2 = rsi.iloc[low1_idx], rsi.iloc[low2_idx]
     price1, price2 = df["low"].iloc[low1_idx], df["low"].iloc[low2_idx]
@@ -132,12 +138,23 @@ def check_rsi_divergence(df: pd.DataFrame, low1_idx: int, low2_idx: int,
     rsi_condition = rsi2 > rsi1
     oversold_condition = rsi1 < oversold_threshold
     gap_condition = (rsi2 - rsi1) >= min_rsi_gap
+    # Iki dip birbirine cok yakinsa (ayni gurultu hareketinin parcasi olabilir)
+    # diverjans yapisal degil, tesadufi sayilir. 4H barda 6 bar =~ 24 saat.
+    bar_distance_condition = (low2_idx - low1_idx) >= min_bar_gap
 
-    passed = price_condition and rsi_condition and oversold_condition and gap_condition
+    passed = (price_condition and rsi_condition and oversold_condition
+              and gap_condition and bar_distance_condition)
+    reason = None
+    if not passed:
+        if not bar_distance_condition:
+            reason = f"Diverjans bar mesafesi yetersiz ({low2_idx - low1_idx} bar < {min_bar_gap})"
+        else:
+            reason = "RSI diverjans kosullari saglanmadi"
     return {
         "passed": passed,
         "rsi1": rsi1, "rsi2": rsi2,
-        "reason": None if passed else "RSI diverjans kosullari saglanmadi",
+        "bar_gap": low2_idx - low1_idx,
+        "reason": reason,
     }
 
 
@@ -221,11 +238,43 @@ def compute_stop_and_size(df: pd.DataFrame, entry_price: float, equity: float,
 
 def evaluate_signal(df: pd.DataFrame, swing_high: float = None, swing_low: float = None,
                      major_swing_high: float = None, major_swing_low: float = None,
-                     equity: float = 1000, risk_pct: float = 0.015) -> SignalResult:
+                     equity: float = 1000, risk_pct: float = 0.015,
+                     fib_confluence_result: dict = None,
+                     ab_fibonacci_result: dict = None) -> SignalResult:
     """
-    Tum kurallari sirayla calistirir. swing_high/low verilmezse son 60 bar
-    icindeki max/min kullanilir (kaba yaklasim - kendi swing detection
-    mantiginla degistirmen onerilir).
+    ══════════════════════════════════════════════════════════════
+    GATE / CONFIDENCE / RISK HIYERARSISI
+    (Boroden confluence + Nison/Wyckoff teyit + Van Tharp risk mantigina
+    dayanarak 3 bagimsiz motorun tek stratejide birlestirilmis hali.)
+
+    GATE (uçü de zorunlu, biri bile gecmezse sinyal reddedilir):
+      1) Double Bottom yapisi (kirilim + hacim)
+      2) RSI pozitif diverjans >=5 puan VE iki dip arasi >=6 bar
+      3) Fiyat Fibonacci 0.618-0.786 bandinda
+
+    CONFIDENCE (gate gectikten sonra kademelendirir, gate'i etkilemez):
+      low    = sadece gate
+      medium = gate + (Wyckoff hacim TEYIDI  VEYA  Motor 3 confluence)
+      high   = gate + Wyckoff hacim TEYIDI  VE  Motor 3 confluence
+
+    BONUS (yalnizca bilgi/raporlama, ASLA gate veya confidence kademesini
+    degistirmez):
+      + Elliott sanity check (buyuk trend retracement uzerinde mi)
+      + Motor 1 (A-B Fibonacci + ABC uzantisi) sinyali varsa
+
+    RISK:
+      Stop-loss   = HER ZAMAN ATR bazli (confidence'tan bagimsiz)
+      Pozisyon    = confidence kademesine gore: low=0.5R, medium=1.0R, high=1.5R
+
+    fib_confluence_result: okx_double_bottom_divergence_v1.find_fib_confluence_signal
+        ciktisi (Motor 3). None ise confluence yok sayilir.
+    ab_fibonacci_result: okx_double_bottom_divergence_v1.find_ab_fibonacci_signal
+        ciktisi (Motor 1). None ise bonusa katkisi olmaz.
+
+    swing_high/low verilmezse son 60 bar icindeki max/min kullanilir (kaba
+    yaklasim - cagiran taraf find_ab_fibonacci_signal'dan gelen gercek A-B
+    swing'ini gecmeyi tercih etmeli).
+    ══════════════════════════════════════════════════════════════
     """
     result = SignalResult()
 
@@ -238,21 +287,21 @@ def evaluate_signal(df: pd.DataFrame, swing_high: float = None, swing_low: float
     if major_swing_low is None:
         major_swing_low = df["low"].min()
 
-    # 1) Double Bottom
+    # ── GATE 1: Double Bottom ────────────────────────────────────────
     db = check_double_bottom(df)
     result.checks["double_bottom"] = db
     if not db["passed"]:
         result.reasons.append(f"Double Bottom: {db['reason']}")
         return result  # temel yapi yoksa devam etmenin anlami yok
 
-    # 2) RSI Divergence
+    # ── GATE 2: RSI Positive Divergence (>=5 puan, >=6 bar mesafe) ───
     rsi_check = check_rsi_divergence(df, db["low1_idx"], db["low2_idx"])
     result.checks["rsi_divergence"] = rsi_check
     if not rsi_check["passed"]:
         result.reasons.append(f"RSI Divergence: {rsi_check['reason']}")
         return result
 
-    # 3) Fibonacci Zone
+    # ── GATE 3: Fibonacci 0.618-0.786 Zone ───────────────────────────
     fib_check = check_fibonacci_zone(df, swing_high, swing_low)
     result.checks["fibonacci_zone"] = fib_check
     result.fib_zone = fib_check["zone"]
@@ -260,35 +309,46 @@ def evaluate_signal(df: pd.DataFrame, swing_high: float = None, swing_low: float
         result.reasons.append(f"Fibonacci Zone: {fib_check['reason']}")
         return result
 
-    # 4) Wyckoff hacim (opsiyonel - basarisiz olsa da sinyali reddetmez, notlanir)
+    # ── Gate gecildi. Simdi confidence kademesini belirleyen 2 katman ──
     wyckoff_check = check_wyckoff_volume(df, db["low1_idx"], db["low2_idx"])
     result.checks["wyckoff_volume"] = wyckoff_check
     if not wyckoff_check["passed"]:
-        result.reasons.append(f"[Bilgi] Wyckoff: {wyckoff_check['reason']}")
+        result.reasons.append(f"[Confidence] Wyckoff hacim teyidi yok: {wyckoff_check['reason']}")
 
-    # 5) Elliott sanity check -> confidence belirler, reddetmez
+    motor3_confluence = fib_confluence_result is not None
+    result.checks["motor3_fib_confluence"] = fib_confluence_result
+    if not motor3_confluence:
+        result.reasons.append("[Confidence] Motor 3 confluence yok (bagimsiz iki swing cakismiyor)")
+
+    if wyckoff_check["passed"] and motor3_confluence:
+        confidence = "high"
+    elif wyckoff_check["passed"] or motor3_confluence:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    # ── BONUS (gate/confidence'i etkilemez, sadece raporlanir) ───────
     elliott_check = check_elliott_sanity(df, major_swing_high, major_swing_low)
     result.checks["elliott_sanity"] = elliott_check
+    if not elliott_check["below_major_fib618"]:
+        result.bonus_score += 0.5
+        result.bonus_notes.append("Elliott: buyuk trend retracement seviyesinin uzerinde")
+    else:
+        result.bonus_notes.append(f"Elliott: {elliott_check['note']}")
 
-    confidence = "high"
-    if elliott_check["below_major_fib618"]:
-        confidence = "low"
-        result.reasons.append(f"[Uyari] Elliott: {elliott_check['note']}")
-    elif not wyckoff_check["passed"]:
-        confidence = "medium"
+    if ab_fibonacci_result is not None:
+        result.bonus_score += 0.5
+        result.bonus_notes.append("Motor 1: A-B Fibonacci + ABC uzantisi sinyali de mevcut")
 
-    # 6) Stop-loss ve pozisyon buyuklugu
+    # ── RISK: stop ATR bazli (sabit), pozisyon confidence'a gore ─────
     entry_price = df["close"].iloc[-1]
     risk_calc = compute_stop_and_size(df, entry_price, equity, risk_pct)
     result.checks["risk"] = risk_calc
     result.stop_price = risk_calc["stop_price"]
     result.position_size = risk_calc["position_size"]
 
-    # confidence dusukse pozisyonu kucult
-    if confidence == "low":
-        result.position_size *= 0.5
-    elif confidence == "medium":
-        result.position_size *= 0.75
+    position_multiplier = {"low": 0.5, "medium": 1.0, "high": 1.5}[confidence]
+    result.position_size *= position_multiplier
 
     result.is_valid = True
     result.confidence = confidence
