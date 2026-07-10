@@ -211,22 +211,32 @@ def check_fibonacci_zone(df: pd.DataFrame, swing_high: float, swing_low: float,
 # ---------------------------------------------------------------------------
 
 def check_fibonacci_proximity(df: pd.DataFrame, swing_high: float, swing_low: float,
-                               lookback: int = 5) -> dict:
+                               lookback: int = 5, swing_high_time=None,
+                               swing_low_time=None) -> dict:
     """check_fibonacci_zone'un 'izleme' versiyonu: fiyat bandin DISINDAYSA
     ne kadar uzakta oldugunu (%) ve son `lookback` barda banda dogru mu
     yoksa uzaga mi hareket ettigini raporlar. Gate degildir, sinyali
-    reddetmez/onaylamaz - sadece 'yaklasiyor' bilgisini tasir."""
+    reddetmez/onaylamaz - sadece 'yaklasiyor' bilgisini tasir.
+
+    swing_high_time/swing_low_time: bu seviyelerin HANGI mumdan geldigini
+    izlemek icin (grafikte dogrulama yapabilmek adina) - hesaba katilmaz,
+    sadece raporlanir."""
     current_price = df["close"].iloc[-1]
     fib618 = swing_high - 0.618 * (swing_high - swing_low)
     fib786 = swing_high - 0.786 * (swing_high - swing_low)
     zone_low, zone_high = min(fib618, fib786), max(fib618, fib786)
 
+    base = {
+        "swing_high": round(float(swing_high), 6),
+        "swing_high_time": swing_high_time,
+        "swing_low": round(float(swing_low), 6),
+        "swing_low_time": swing_low_time,
+        "zone": (round(float(zone_low), 6), round(float(zone_high), 6)),
+        "current_price": round(float(current_price), 6),
+    }
+
     if zone_low <= current_price <= zone_high:
-        return {
-            "in_zone": True, "distance_pct": 0.0, "direction": "bandin icinde",
-            "zone": (round(float(zone_low), 6), round(float(zone_high), 6)),
-            "current_price": round(float(current_price), 6),
-        }
+        return {**base, "in_zone": True, "distance_pct": 0.0, "direction": "bandin icinde"}
 
     if current_price > zone_high:
         distance_pct = (current_price - zone_high) / zone_high * 100
@@ -242,11 +252,10 @@ def check_fibonacci_proximity(df: pd.DataFrame, swing_high: float, swing_low: fl
         approaching = current_price > past_price   # alttan yukseliyorsa banda yaklasiyor
 
     return {
+        **base,
         "in_zone": False,
         "distance_pct": round(float(distance_pct), 2),
         "direction": "yaklasiyor" if approaching else "uzaklasiyor",
-        "zone": (round(float(zone_low), 6), round(float(zone_high), 6)),
-        "current_price": round(float(current_price), 6),
     }
 
 
@@ -431,12 +440,18 @@ def evaluate_signal(df: pd.DataFrame, swing_high: float = None, swing_low: float
 # ---------------------------------------------------------------------------
 
 def evaluate_watchlist(df: pd.DataFrame, swing_high: float = None, swing_low: float = None,
+                        swing_high_time=None, swing_low_time=None,
                         max_fib_distance_pct: float = 8.0) -> dict:
     """
     evaluate_signal() SIKI bir gate'tir: uc kosul da SU AN saglanmadikca
     None doner. Bu fonksiyon ise "yapisal olarak hazir ama henuz tetiklenmemis"
     coinleri yakalar - kullanicinin "1-2 gun surebilir ama oraya gelirse
     islem yaparim" mantigina karsilik gelir.
+
+    swing_high/swing_low CAGIRAN TARAFTAN gelmezse (yani Motor 1 bir A-B
+    swing'i bulamadiysa), varsayilan olarak son 60 barin (4H'de ~10 gun)
+    en yuksek/en dusuk noktasi kullanilir - VE bu noktalarin zaman
+    damgalari da otomatik hesaplanir (grafikte dogrulama yapabilmen icin).
 
     Donus: None (izlemeye deger degil - dip yapisi bile yok) VEYA bir dict:
       {
@@ -447,6 +462,8 @@ def evaluate_watchlist(df: pd.DataFrame, swing_high: float = None, swing_low: fl
         "in_fib_zone": bool,
         "fib_distance_pct": float | None, # bandin disindaysa % mesafe
         "fib_direction": str | None,      # "yaklasiyor" | "uzaklasiyor"
+        "swing_high": float, "swing_high_time": str,  # bandin dayandigi ust nokta
+        "swing_low": float, "swing_low_time": str,    # bandin dayandigi alt nokta
         "missing_steps": [str, ...],      # hangi adimlar eksik (siradaki oncelik)
       }
 
@@ -454,9 +471,13 @@ def evaluate_watchlist(df: pd.DataFrame, swing_high: float = None, swing_low: fl
     Gercek giris karari HER ZAMAN evaluate_signal()'in gate'inden gecer.
     """
     if swing_high is None:
-        swing_high = df["high"].iloc[-60:].max()
+        window = df.iloc[-60:]
+        swing_high = window["high"].max()
+        swing_high_time = window["high"].idxmax().isoformat()
     if swing_low is None:
-        swing_low = df["low"].iloc[-60:].min()
+        window = df.iloc[-60:]
+        swing_low = window["low"].min()
+        swing_low_time = window["low"].idxmin().isoformat()
 
     db = check_double_bottom(df)
     if "low1_idx" not in db:
@@ -475,7 +496,10 @@ def evaluate_watchlist(df: pd.DataFrame, swing_high: float = None, swing_low: fl
     if not rsi_check["passed"]:
         missing_steps.append("rsi_diverjans_bekleniyor")
 
-    fib_proximity = check_fibonacci_proximity(df, swing_high, swing_low)
+    fib_proximity = check_fibonacci_proximity(
+        df, swing_high, swing_low,
+        swing_high_time=swing_high_time, swing_low_time=swing_low_time,
+    )
     if not fib_proximity["in_zone"]:
         missing_steps.append("fib_bandi_bekleniyor")
         # cok uzaksa (banda yaklasma ihtimali dusuk gorunuyorsa) izleme listesine alma
@@ -497,6 +521,10 @@ def evaluate_watchlist(df: pd.DataFrame, swing_high: float = None, swing_low: fl
         "fib_zone_high": fib_proximity.get("zone", (None, None))[1],
         "fib_distance_pct": fib_proximity.get("distance_pct"),
         "fib_direction": fib_proximity.get("direction"),
+        "swing_high": fib_proximity.get("swing_high"),
+        "swing_high_time": fib_proximity.get("swing_high_time"),
+        "swing_low": fib_proximity.get("swing_low"),
+        "swing_low_time": fib_proximity.get("swing_low_time"),
         "missing_steps": missing_steps,
     }
 
