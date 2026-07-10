@@ -60,6 +60,7 @@ warnings.filterwarnings("ignore")
 # çalıştırmalarında bu dosyalar artifact olarak toplanabilir.
 LOG_FILE     = os.environ.get("SIGNALS_LOG_FILE", "signals.log")
 SIGNALS_JSON = os.environ.get("SIGNALS_JSON_FILE", "signals.json")
+STATE_FILE   = os.environ.get("WATCHLIST_STATE_FILE", "watchlist_state.json")
 
 logger = logging.getLogger("okx_scanner")
 logger.setLevel(logging.INFO)
@@ -77,6 +78,53 @@ _console_handler = logging.StreamHandler()
 _console_handler.setFormatter(logging.Formatter("%(message)s"))
 _console_handler.setLevel(logging.WARNING)
 logger.addHandler(_console_handler)
+
+
+def load_previous_watchlist_state():
+    """Onceki tarama turunun watchlist snapshot'ini yukler (GitHub Actions
+    cache'inden gelir). Dosya yoksa veya bozuksa bos dict doner - sistem
+    kendi kendini onarir, hata firlatmaz."""
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        log_status(f"⚠️  Onceki watchlist state okunamadi, sifirdan baslaniyor ({exc})")
+        return {}
+
+
+def save_watchlist_state(watchlist_results):
+    """Bu turun watchlist sonuclarini bir sonraki tur icin kaydeder
+    (GitHub Actions cache adimi bunu tasir)."""
+    state = {
+        entry["symbol"]: {
+            "fib_distance_pct": entry.get("fib_distance_pct"),
+            "in_fib_zone": entry.get("in_fib_zone"),
+            "missing_steps": entry.get("missing_steps"),
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        for entry in watchlist_results
+    }
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+
+
+def compute_momentum(symbol, current_distance_pct, previous_state):
+    """Onceki tura gore mesafe degisimini hesaplar. Pozitif deger =
+    banda yaklasiyor (mesafe kucaliyor), negatif = uzaklasiyor."""
+    prev = previous_state.get(symbol)
+    if prev is None or prev.get("fib_distance_pct") is None or current_distance_pct is None:
+        return None, "yeni"
+    momentum = round(float(prev["fib_distance_pct"]) - float(current_distance_pct), 3)
+    if momentum > 0.05:
+        trend = "iyilesiyor"
+    elif momentum < -0.05:
+        trend = "kotulesiyor"
+    else:
+        trend = "sabit"
+    return momentum, trend
+
 
 
 def log_status(msg):
@@ -761,6 +809,8 @@ def run_scanner():
     watchlist_results   = []
     skipped_data        = 0
     skipped_crit         = 0
+    previous_watchlist_state = load_previous_watchlist_state()
+    log_status(f"📈  Onceki tur state: {len(previous_watchlist_state)} coin (momentum karsilastirmasi icin)")
 
     for symbol in tqdm(usdt_pairs, desc="🔍 Taranıyor", unit="coin"):
 
@@ -812,10 +862,18 @@ def run_scanner():
             if watch is not None:
                 watch["symbol"] = symbol
                 watch["volume_24h_usdt"] = round(float(vol_24h), 2) if vol_24h is not None else None
+
+                momentum, trend = compute_momentum(
+                    symbol, watch.get("fib_distance_pct"), previous_watchlist_state
+                )
+                watch["momentum_pct"] = momentum
+                watch["trend"] = trend
+
                 watchlist_results.append(watch)
                 log_signal(
                     f"👀  [Izleme] {symbol:<16} | eksik={watch['missing_steps']} | "
-                    f"fib_mesafe=%{watch['fib_distance_pct']} ({watch['fib_direction']})"
+                    f"fib_mesafe=%{watch['fib_distance_pct']} ({watch['fib_direction']}) | "
+                    f"trend={trend} (momentum={momentum})"
                     if not watch["in_fib_zone"] else
                     f"👀  [Izleme] {symbol:<16} | eksik={watch['missing_steps']} | fib bandinin icinde"
                 )
@@ -833,11 +891,14 @@ def run_scanner():
     log_status(f"  ✅  Eşleşen (Double Bottom — tek strateji): {len(validation_results)}")
 
     write_signal_outputs(validation_results, watchlist_results, skipped_data, skipped_crit, total)
+    save_watchlist_state(watchlist_results)
 
     # ── İzleme Listesi CSV'si (0 sinyal olsa bile HER ZAMAN yazılır) ──
     if watchlist_results:
         watch_col_map = {
             "symbol"            : "Sembol",
+            "trend"             : "Trend",
+            "momentum_pct"      : "Momentum (onceki tura gore)",
             "missing_steps"     : "Eksik Adımlar",
             "breakout_confirmed": "Kırılım Oldu mu",
             "volume_ok"         : "Hacim Teyidi",
@@ -846,16 +907,23 @@ def run_scanner():
             "fib_distance_pct"  : "Fib Bandına Uzaklık%",
             "fib_direction"     : "Yön",
             "low1_price"        : "Dip1 Fiyatı",
+            "low1_time"         : "Dip1 Zamanı",
             "low2_price"        : "Dip2 Fiyatı",
+            "low2_time"         : "Dip2 Zamanı",
+            "peak_mid"          : "Kırılım Seviyesi (Peak Mid)",
+            "fib_zone_low"      : "Fib Bandı Alt Sınır",
+            "fib_zone_high"     : "Fib Bandı Üst Sınır",
             "volume_24h_usdt"   : "24s Hacim (USDT)",
         }
         df_watch = pd.DataFrame(watchlist_results)
         df_watch = df_watch[[c for c in watch_col_map if c in df_watch.columns]]
         df_watch = df_watch.rename(columns=watch_col_map)
-        # En az eksik adımı olanlar (tetiklenmeye en yakın) önce
+        # "iyilesiyor" trendindekiler once, sonra eksik adim sayisina gore
+        trend_rank = {"iyilesiyor": 2, "yeni": 1, "sabit": 1, "kotulesiyor": 0}
+        df_watch["_trend_rank"] = df_watch["Trend"].map(trend_rank)
         df_watch["_eksik_sayisi"] = df_watch["Eksik Adımlar"].apply(len)
-        df_watch = df_watch.sort_values("_eksik_sayisi").drop(columns=["_eksik_sayisi"])
-        df_watch = df_watch.reset_index(drop=True)
+        df_watch = df_watch.sort_values(["_trend_rank", "_eksik_sayisi"], ascending=[False, True])
+        df_watch = df_watch.drop(columns=["_trend_rank", "_eksik_sayisi"]).reset_index(drop=True)
 
         if EXPORT_CSV:
             watch_fn = "okx_watchlist.csv"
