@@ -96,12 +96,16 @@ def load_previous_watchlist_state():
 
 def save_watchlist_state(watchlist_results):
     """Bu turun watchlist sonuclarini bir sonraki tur icin kaydeder
-    (GitHub Actions cache adimi bunu tasir)."""
+    (GitHub Actions cache adimi bunu tasir). Swing referans zamanlarini da
+    saklar - boylece bir sonraki tur, bandin kendisi degisti mi yoksa
+    sadece fiyat mi hareket etti ayirt edebilir."""
     state = {
         entry["symbol"]: {
             "fib_distance_pct": entry.get("fib_distance_pct"),
             "in_fib_zone": entry.get("in_fib_zone"),
             "missing_steps": entry.get("missing_steps"),
+            "swing_high_time": entry.get("swing_high_time"),
+            "swing_low_time": entry.get("swing_low_time"),
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
         for entry in watchlist_results
@@ -110,12 +114,30 @@ def save_watchlist_state(watchlist_results):
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
-def compute_momentum(symbol, current_distance_pct, previous_state):
+def compute_momentum(symbol, current_distance_pct, previous_state,
+                      current_swing_high_time=None, current_swing_low_time=None):
     """Onceki tura gore mesafe degisimini hesaplar. Pozitif deger =
-    banda yaklasiyor (mesafe kucaliyor), negatif = uzaklasiyor."""
+    banda yaklasiyor (mesafe kucaliyor), negatif = uzaklasiyor.
+
+    ONEMLI: Fib bandinin dayandigi swing (swing_high/low) referansi
+    degistiyse (yeni bir A-B swing tespit edildiyse veya 60-bar
+    penceresi kaydiysa), mesafe kiyaslamasi ELMA-ARMUT olur - fiyat
+    hareket etmese bile bant kaymis olabilir. Bu durumda numerik
+    momentum yerine "referans_degisti" donulur, yanlis sinyal verilmez.
+    """
     prev = previous_state.get(symbol)
     if prev is None or prev.get("fib_distance_pct") is None or current_distance_pct is None:
         return None, "yeni"
+
+    prev_high_t = prev.get("swing_high_time")
+    prev_low_t = prev.get("swing_low_time")
+    reference_changed = (
+        (prev_high_t is not None and current_swing_high_time is not None and prev_high_t != current_swing_high_time)
+        or (prev_low_t is not None and current_swing_low_time is not None and prev_low_t != current_swing_low_time)
+    )
+    if reference_changed:
+        return None, "referans_degisti"
+
     momentum = round(float(prev["fib_distance_pct"]) - float(current_distance_pct), 3)
     if momentum > 0.05:
         trend = "iyilesiyor"
@@ -872,7 +894,9 @@ def run_scanner():
                 watch["volume_24h_usdt"] = round(float(vol_24h), 2) if vol_24h is not None else None
 
                 momentum, trend = compute_momentum(
-                    symbol, watch.get("fib_distance_pct"), previous_watchlist_state
+                    symbol, watch.get("fib_distance_pct"), previous_watchlist_state,
+                    current_swing_high_time=watch.get("swing_high_time"),
+                    current_swing_low_time=watch.get("swing_low_time"),
                 )
                 watch["momentum_pct"] = momentum
                 watch["trend"] = trend
@@ -931,7 +955,7 @@ def run_scanner():
         df_watch = df_watch[[c for c in watch_col_map if c in df_watch.columns]]
         df_watch = df_watch.rename(columns=watch_col_map)
         # "iyilesiyor" trendindekiler once, sonra eksik adim sayisina gore
-        trend_rank = {"iyilesiyor": 2, "yeni": 1, "sabit": 1, "kotulesiyor": 0}
+        trend_rank = {"iyilesiyor": 3, "yeni": 1, "sabit": 1, "referans_degisti": 1, "kotulesiyor": 0}
         df_watch["_trend_rank"] = df_watch["Trend"].map(trend_rank)
         df_watch["_eksik_sayisi"] = df_watch["Eksik Adımlar"].apply(len)
         df_watch = df_watch.sort_values(["_trend_rank", "_eksik_sayisi"], ascending=[False, True])
