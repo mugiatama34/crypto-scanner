@@ -838,9 +838,14 @@ def run_scanner():
         # swing_high/swing_low'unu kullanır (son 60 bar max/min
         # varsayılanından daha güvenilir); bulamadıysa kendi varsayılanına düşer.
         swing_high = swing_low = None
+        swing_high_time = swing_low_time = None
         if result is not None:
-            swing_high = max(result["a_price"], result["b_price"])
-            swing_low  = min(result["a_price"], result["b_price"])
+            if result["a_price"] >= result["b_price"]:
+                swing_high, swing_high_time = result["a_price"], result["a_time"]
+                swing_low, swing_low_time = result["b_price"], result["b_time"]
+            else:
+                swing_high, swing_high_time = result["b_price"], result["b_time"]
+                swing_low, swing_low_time = result["a_price"], result["a_time"]
 
         validation = evaluate_signal(
             df, swing_high=swing_high, swing_low=swing_low,
@@ -858,7 +863,10 @@ def run_scanner():
 
             # Gate'i tam gecemedi ama yapisal olarak yakinsa izleme listesine al.
             # Bu ISLEM TETIKLEMEZ, sadece "yaklasiyor" bilgisi tasir.
-            watch = evaluate_watchlist(df, swing_high=swing_high, swing_low=swing_low)
+            watch = evaluate_watchlist(
+                df, swing_high=swing_high, swing_low=swing_low,
+                swing_high_time=swing_high_time, swing_low_time=swing_low_time,
+            )
             if watch is not None:
                 watch["symbol"] = symbol
                 watch["volume_24h_usdt"] = round(float(vol_24h), 2) if vol_24h is not None else None
@@ -913,6 +921,10 @@ def run_scanner():
             "peak_mid"          : "Kırılım Seviyesi (Peak Mid)",
             "fib_zone_low"      : "Fib Bandı Alt Sınır",
             "fib_zone_high"     : "Fib Bandı Üst Sınır",
+            "swing_high"        : "Fib Bandı Kaynağı: Swing High",
+            "swing_high_time"   : "Swing High Zamanı",
+            "swing_low"         : "Fib Bandı Kaynağı: Swing Low",
+            "swing_low_time"    : "Swing Low Zamanı",
             "volume_24h_usdt"   : "24s Hacim (USDT)",
         }
         df_watch = pd.DataFrame(watchlist_results)
