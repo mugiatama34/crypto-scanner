@@ -222,7 +222,11 @@ def check_fibonacci_proximity(df: pd.DataFrame, swing_high: float, swing_low: fl
     zone_low, zone_high = min(fib618, fib786), max(fib618, fib786)
 
     if zone_low <= current_price <= zone_high:
-        return {"in_zone": True, "distance_pct": 0.0, "direction": "bandin icinde"}
+        return {
+            "in_zone": True, "distance_pct": 0.0, "direction": "bandin icinde",
+            "zone": (round(float(zone_low), 6), round(float(zone_high), 6)),
+            "current_price": round(float(current_price), 6),
+        }
 
     if current_price > zone_high:
         distance_pct = (current_price - zone_high) / zone_high * 100
@@ -481,11 +485,16 @@ def evaluate_watchlist(df: pd.DataFrame, swing_high: float = None, swing_low: fl
     return {
         "structure_ready": True,
         "low1_price": round(float(db["low1_price"]), 6),
+        "low1_time": df.index[db["low1_idx"]].isoformat(),
         "low2_price": round(float(db["low2_price"]), 6),
+        "low2_time": df.index[db["low2_idx"]].isoformat(),
+        "peak_mid": round(float(db["peak_mid"]), 6),
         "breakout_confirmed": bool(breakout_confirmed),
         "volume_ok": bool(volume_ok),
         "rsi_divergence_ok": bool(rsi_check["passed"]),
         "in_fib_zone": bool(fib_proximity["in_zone"]),
+        "fib_zone_low": fib_proximity.get("zone", (None, None))[0],
+        "fib_zone_high": fib_proximity.get("zone", (None, None))[1],
         "fib_distance_pct": fib_proximity.get("distance_pct"),
         "fib_direction": fib_proximity.get("direction"),
         "missing_steps": missing_steps,
