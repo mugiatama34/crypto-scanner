@@ -79,10 +79,15 @@ class SignalResult:
 
 # ---------------------------------------------------------------------------
 # 1) Double Bottom yapisi (Murphy)
+#    2026-07-10: min_bar_gap 10->8, level_tolerance %2.5->%5 olarak gevsetildi.
+#    Gerekce: ilk canli tarama (56 coin, 0 sinyal) sonuclarinin analizi -
+#    reddedilenlerin buyuk kismi 8-9 bar / %3-6 araliginda kumelenmisti (sinirda),
+#    yani gate degil signal_validation.py'nin kendi filtreleri (structural
+#    tolerans) darbogazdi. RSI/Fib bandı zaten sonraki elemeyi yapiyor.
 # ---------------------------------------------------------------------------
 
-def check_double_bottom(df: pd.DataFrame, min_bar_gap: int = 10,
-                         level_tolerance: float = 0.025,
+def check_double_bottom(df: pd.DataFrame, min_bar_gap: int = 8,
+                         level_tolerance: float = 0.05,
                          volume_breakout_mult: float = 1.3) -> dict:
     closes = df["close"]
     lows = find_local_lows(df["low"], order=3)
