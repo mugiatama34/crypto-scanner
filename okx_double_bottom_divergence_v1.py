@@ -834,11 +834,39 @@ def run_scanner():
 
     write_signal_outputs(validation_results, watchlist_results, skipped_data, skipped_crit, total)
 
+    # ── İzleme Listesi CSV'si (0 sinyal olsa bile HER ZAMAN yazılır) ──
+    if watchlist_results:
+        watch_col_map = {
+            "symbol"            : "Sembol",
+            "missing_steps"     : "Eksik Adımlar",
+            "breakout_confirmed": "Kırılım Oldu mu",
+            "volume_ok"         : "Hacim Teyidi",
+            "rsi_divergence_ok" : "RSI Diverjans OK",
+            "in_fib_zone"       : "Fib Bandında mı",
+            "fib_distance_pct"  : "Fib Bandına Uzaklık%",
+            "fib_direction"     : "Yön",
+            "low1_price"        : "Dip1 Fiyatı",
+            "low2_price"        : "Dip2 Fiyatı",
+            "volume_24h_usdt"   : "24s Hacim (USDT)",
+        }
+        df_watch = pd.DataFrame(watchlist_results)
+        df_watch = df_watch[[c for c in watch_col_map if c in df_watch.columns]]
+        df_watch = df_watch.rename(columns=watch_col_map)
+        # En az eksik adımı olanlar (tetiklenmeye en yakın) önce
+        df_watch["_eksik_sayisi"] = df_watch["Eksik Adımlar"].apply(len)
+        df_watch = df_watch.sort_values("_eksik_sayisi").drop(columns=["_eksik_sayisi"])
+        df_watch = df_watch.reset_index(drop=True)
+
+        if EXPORT_CSV:
+            watch_fn = "okx_watchlist.csv"
+            df_watch.to_csv(watch_fn, index=False, encoding="utf-8-sig")
+            log_status(f"👀  CSV (İzleme Listesi, {len(df_watch)} coin) → {watch_fn}")
+
     if not validation_results:
         log_status("\n❌  Hiç aday bulunamadı (Double Bottom gate'ini geçen sinyal yok).")
         return None
 
-    # ── Tek birleşik CSV çıktısı ─────────────────────────────────────
+    # ── Tek birleşik sinyal CSV çıktısı ────────────────────────────────
     col_map = {
         "symbol"                : "Sembol",
         "confidence"             : "Güven",
@@ -870,33 +898,6 @@ def run_scanner():
         fn = "okx_double_bottom_signals.csv"
         df_out.to_csv(fn, index=False, encoding="utf-8-sig")
         log_status(f"💾  CSV → {fn}")
-
-    # ── İzleme Listesi CSV'si ─────────────────────────────────────────
-    if watchlist_results:
-        watch_col_map = {
-            "symbol"            : "Sembol",
-            "missing_steps"     : "Eksik Adımlar",
-            "breakout_confirmed": "Kırılım Oldu mu",
-            "volume_ok"         : "Hacim Teyidi",
-            "rsi_divergence_ok" : "RSI Diverjans OK",
-            "in_fib_zone"       : "Fib Bandında mı",
-            "fib_distance_pct"  : "Fib Bandına Uzaklık%",
-            "fib_direction"     : "Yön",
-            "low1_price"        : "Dip1 Fiyatı",
-            "low2_price"        : "Dip2 Fiyatı",
-            "volume_24h_usdt"   : "24s Hacim (USDT)",
-        }
-        df_watch = pd.DataFrame(watchlist_results)
-        df_watch = df_watch[[c for c in watch_col_map if c in df_watch.columns]]
-        df_watch = df_watch.rename(columns=watch_col_map)
-        # En az eksik adımı olanlar (tetiklenmeye en yakın) önce
-        df_watch["_eksik_sayisi"] = df_watch["Eksik Adımlar"].apply(len)
-        df_watch = df_watch.sort_values("_eksik_sayisi").drop(columns=["_eksik_sayisi"])
-        df_watch = df_watch.reset_index(drop=True)
-
-        watch_fn = "okx_watchlist.csv"
-        df_watch.to_csv(watch_fn, index=False, encoding="utf-8-sig")
-        log_status(f"👀  CSV (İzleme Listesi, {len(df_watch)} coin) → {watch_fn}")
 
     return df_out
 
