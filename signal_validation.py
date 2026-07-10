@@ -207,6 +207,48 @@ def check_fibonacci_zone(df: pd.DataFrame, swing_high: float, swing_low: float,
 
 
 # ---------------------------------------------------------------------------
+# 3b) Fibonacci bandina MESAFE ve YON (izleme listesi icin - gate degil)
+# ---------------------------------------------------------------------------
+
+def check_fibonacci_proximity(df: pd.DataFrame, swing_high: float, swing_low: float,
+                               lookback: int = 5) -> dict:
+    """check_fibonacci_zone'un 'izleme' versiyonu: fiyat bandin DISINDAYSA
+    ne kadar uzakta oldugunu (%) ve son `lookback` barda banda dogru mu
+    yoksa uzaga mi hareket ettigini raporlar. Gate degildir, sinyali
+    reddetmez/onaylamaz - sadece 'yaklasiyor' bilgisini tasir."""
+    current_price = df["close"].iloc[-1]
+    fib618 = swing_high - 0.618 * (swing_high - swing_low)
+    fib786 = swing_high - 0.786 * (swing_high - swing_low)
+    zone_low, zone_high = min(fib618, fib786), max(fib618, fib786)
+
+    if zone_low <= current_price <= zone_high:
+        return {"in_zone": True, "distance_pct": 0.0, "direction": "bandin icinde"}
+
+    if current_price > zone_high:
+        distance_pct = (current_price - zone_high) / zone_high * 100
+    else:
+        distance_pct = (zone_low - current_price) / zone_low * 100
+
+    past_idx = -lookback - 1 if len(df) > lookback else 0
+    past_price = df["close"].iloc[past_idx]
+
+    if current_price > zone_high:
+        approaching = current_price < past_price   # ustten iniyorsa banda yaklasiyor
+    else:
+        approaching = current_price > past_price   # alttan yukseliyorsa banda yaklasiyor
+
+    return {
+        "in_zone": False,
+        "distance_pct": round(float(distance_pct), 2),
+        "direction": "yaklasiyor" if approaching else "uzaklasiyor",
+        "zone": (round(float(zone_low), 6), round(float(zone_high), 6)),
+        "current_price": round(float(current_price), 6),
+    }
+
+
+
+
+# ---------------------------------------------------------------------------
 # 4) Wyckoff hacim teyidi (opsiyonel filtre)
 # ---------------------------------------------------------------------------
 
@@ -378,6 +420,76 @@ def evaluate_signal(df: pd.DataFrame, swing_high: float = None, swing_low: float
     result.is_valid = True
     result.confidence = confidence
     return result
+
+
+# ---------------------------------------------------------------------------
+# IZLEME LISTESI (watchlist) - gate degil, erken uyaridir
+# ---------------------------------------------------------------------------
+
+def evaluate_watchlist(df: pd.DataFrame, swing_high: float = None, swing_low: float = None,
+                        max_fib_distance_pct: float = 8.0) -> dict:
+    """
+    evaluate_signal() SIKI bir gate'tir: uc kosul da SU AN saglanmadikca
+    None doner. Bu fonksiyon ise "yapisal olarak hazir ama henuz tetiklenmemis"
+    coinleri yakalar - kullanicinin "1-2 gun surebilir ama oraya gelirse
+    islem yaparim" mantigina karsilik gelir.
+
+    Donus: None (izlemeye deger degil - dip yapisi bile yok) VEYA bir dict:
+      {
+        "structure_ready": True,          # iki dip + mesafe + tolerans gecti
+        "breakout_confirmed": bool,
+        "volume_ok": bool,
+        "rsi_divergence_ok": bool,
+        "in_fib_zone": bool,
+        "fib_distance_pct": float | None, # bandin disindaysa % mesafe
+        "fib_direction": str | None,      # "yaklasiyor" | "uzaklasiyor"
+        "missing_steps": [str, ...],      # hangi adimlar eksik (siradaki oncelik)
+      }
+
+    NOT: Bu fonksiyonun ciktisi ISLEM TETIKLEMEZ. Sadece "izle" sinyalidir.
+    Gercek giris karari HER ZAMAN evaluate_signal()'in gate'inden gecer.
+    """
+    if swing_high is None:
+        swing_high = df["high"].iloc[-60:].max()
+    if swing_low is None:
+        swing_low = df["low"].iloc[-60:].min()
+
+    db = check_double_bottom(df)
+    if "low1_idx" not in db:
+        return None  # dip yapisi (2 dip + mesafe + tolerans) bile yok, izlemeye deger degil
+
+    missing_steps = []
+
+    breakout_confirmed = db.get("breakout_confirmed", False)
+    volume_ok = db.get("volume_ok", False)
+    if not breakout_confirmed:
+        missing_steps.append("kirilim_bekleniyor")
+    elif not volume_ok:
+        missing_steps.append("hacim_teyidi_bekleniyor")
+
+    rsi_check = check_rsi_divergence(df, db["low1_idx"], db["low2_idx"])
+    if not rsi_check["passed"]:
+        missing_steps.append("rsi_diverjans_bekleniyor")
+
+    fib_proximity = check_fibonacci_proximity(df, swing_high, swing_low)
+    if not fib_proximity["in_zone"]:
+        missing_steps.append("fib_bandi_bekleniyor")
+        # cok uzaksa (banda yaklasma ihtimali dusuk gorunuyorsa) izleme listesine alma
+        if fib_proximity["distance_pct"] > max_fib_distance_pct:
+            return None
+
+    return {
+        "structure_ready": True,
+        "low1_price": round(float(db["low1_price"]), 6),
+        "low2_price": round(float(db["low2_price"]), 6),
+        "breakout_confirmed": bool(breakout_confirmed),
+        "volume_ok": bool(volume_ok),
+        "rsi_divergence_ok": bool(rsi_check["passed"]),
+        "in_fib_zone": bool(fib_proximity["in_zone"]),
+        "fib_distance_pct": fib_proximity.get("distance_pct"),
+        "fib_direction": fib_proximity.get("direction"),
+        "missing_steps": missing_steps,
+    }
 
 
 if __name__ == "__main__":
