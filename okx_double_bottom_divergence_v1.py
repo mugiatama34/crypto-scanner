@@ -389,7 +389,7 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
     current_rsi   = rsi.iloc[-1]
 
     if pd.isna(current_rsi):
-        return None
+        return None, "rsi_hesaplanamiyor"
 
     swings = []
     for window_days in TIME_WINDOWS_DAYS:
@@ -442,9 +442,10 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
 
     if len(swings) < 2:
         if verbose:
-            log_status("   [Confluence] atlandı → en az 2 bağımsız swing bulunamadı")
-        return None
+            log_status("   [Confluence] atlandı → en az 2 geçerli pencere swing'i bulunamadı (veri yetersiz)")
+        return None, "yetersiz_pencere"
 
+    independent_pair_exists = False
     best_match = None
     for i in range(len(swings)):
         for j in range(i + 1, len(swings)):
@@ -465,6 +466,8 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
                         f"→ ortak nokta paylaşıyorlar (gerçekten bağımsız değil)"
                     )
                 continue
+
+            independent_pair_exists = True
 
             for ratio_i, level_i in swing_i["levels"].items():
                 dist_i = abs(current_price - level_i) / level_i
@@ -495,9 +498,15 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
                         }
 
     if best_match is None:
-        if verbose:
-            log_status("   [Confluence] atlandı → hiçbir swing çifti fiyata makul mesafede değil")
-        return None
+        if not independent_pair_exists:
+            reason = "tumu_ortak_nokta_paylasiyor"
+            if verbose:
+                log_status("   [Confluence] atlandı → bulunan tüm swing çiftleri ortak nokta paylaşıyor (gerçekten bağımsız değil)")
+        else:
+            reason = "cok_uzak_veya_capraz_tip_yok"
+            if verbose:
+                log_status("   [Confluence] atlandı → bağımsız çiftler var ama hiçbiri makul mesafede çapraz eşleşme vermiyor")
+        return None, reason
 
     swing_i, swing_j = best_match["swing_i"], best_match["swing_j"]
     within_tolerance = (
@@ -532,7 +541,7 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
         "combined_dist_pct"     : round(float(best_match["combined_dist"]) * 100, 3),
         "within_tolerance"      : bool(within_tolerance),
         "candle_total"          : len(df),
-    }
+    }, None
 
 
 def evaluate_confluence_entry(df, candidate, equity=1000, risk_pct=0.015):
@@ -723,7 +732,7 @@ def run_scanner():
         # (evaluate_confluence_entry icinde) bonus/confidence katmani.
         # Motor 1 (A-B/ABC) artik hic kullanilmiyor - confluence zaten
         # onun yaptigi isin daha guclu (2-swing) versiyonu.
-        candidate = find_confluence_candidates(df)
+        candidate, no_candidate_reason = find_confluence_candidates(df)
         vol_24h = volume_by_symbol.get(symbol)
 
         confluence_signal = evaluate_confluence_entry(df, candidate)
@@ -741,7 +750,14 @@ def run_scanner():
         else:
             skipped_crit += 1
             if candidate is None:
-                log_signal(f"ℹ️  [Confluence] {symbol:<16} reddedildi | reasons=['En az 2 bağımsız swing bulunamadı']")
+                reason_map = {
+                    "yetersiz_pencere": "En az 2 geçerli pencere swing'i bulunamadı (veri yetersiz)",
+                    "tumu_ortak_nokta_paylasiyor": "Bulunan swing çiftlerinin TÜMÜ ortak nokta paylaşıyor (gerçekten bağımsız değil)",
+                    "cok_uzak_veya_capraz_tip_yok": "Bağımsız çiftler var ama hiçbiri makul mesafede çapraz (retracement×extension) eşleşme vermiyor",
+                    "rsi_hesaplanamiyor": "RSI henüz hesaplanamıyor (ısınma dönemi)",
+                }
+                reason_text = reason_map.get(no_candidate_reason, no_candidate_reason)
+                log_signal(f"ℹ️  [Confluence] {symbol:<16} reddedildi | reasons=['{reason_text}']")
             else:
                 reasons = []
                 if not candidate.get("within_tolerance"):
@@ -908,11 +924,11 @@ def debug_test_symbol(test_symbol, debug=True):
 
     if debug:
         log_status("\n── DEBUG: Confluence Adayı Taraması (90/60/30 gün) ──")
-    candidate_t = find_confluence_candidates(df_t, verbose=debug)
+    candidate_t, no_candidate_reason_t = find_confluence_candidates(df_t, verbose=debug)
 
     log_status("\n── SONUÇ: Confluence Gate (tek strateji) ──")
     if candidate_t is None:
-        log_status("   ❌  En az 2 bağımsız swing bulunamadı — izleme listesine de girmiyor.")
+        log_status(f"   ❌  Aday bulunamadı — neden: {no_candidate_reason_t} — izleme listesine de girmiyor.")
         return
 
     log_status(f"   Swing1: {candidate_t['swing_1_window_days']}g, {candidate_t['swing_1_fib_ratio']} → "
