@@ -58,8 +58,8 @@ import pandas as pd
 from tqdm import tqdm
 
 from signal_validation import (
-    evaluate_signal,
-    check_double_bottom, compute_stop_and_size,
+    evaluate_signal, evaluate_signal_short,
+    check_double_bottom, check_double_top, compute_stop_and_size,
 )
 
 warnings.filterwarnings("ignore")
@@ -235,6 +235,10 @@ EXTENSION_RATIOS        = [1.272, 1.618]
 FIB_CONFLUENCE_LEVELS    = RETRACEMENT_RATIOS + EXTENSION_RATIOS
 FIB_CONFLUENCE_TOLERANCE = float(os.environ.get("FIB_CONFLUENCE_TOLERANCE", 0.03))
 RSI_OVERSOLD_THRESHOLD   = 35
+# 2026-07-10: SHORT tarafi eklendi. RSI_OVERBOUGHT, long'un (oversold<35)
+# aynasi - fiyat yukaridan bir confluence direncine yaklasirken RSI>65 ise
+# short kurulumu olarak degerlendirilir.
+RSI_OVERBOUGHT_THRESHOLD = 65
 # Izleme listesi: gate'i (within_tolerance) tam gecemeyen ama toplam mesafesi
 # bu esigin altinda olan confluence adaylari "yaklasiyor/uzaklasiyor" olarak
 # raporlanir. FIB_CONFLUENCE_TOLERANCE'in (%3+%3=%6 max gate) uzerinde,
@@ -273,7 +277,7 @@ def log_settings():
     log_status("✅  Ayarlar yüklendi — OKX Confluence Tarayıcı v4.1 (pivot-tabanlı) (Double Bottom = bonus katmanı)")
     log_status(f"   Zaman Dilimi     : {TIMEFRAME}")
     log_status(f"   Pivot Tespiti    : ZigZag ±%{ZIGZAG_PCT_THRESHOLD*100:.0f} (takvim penceresi değil, fiyat yapısından)")
-    log_status(f"   Confluence       : Fib seviyeleri={FIB_CONFLUENCE_LEVELS}, tolerans=±%{FIB_CONFLUENCE_TOLERANCE*100:.0f}, RSI oversold<{RSI_OVERSOLD_THRESHOLD}")
+    log_status(f"   Confluence       : Fib seviyeleri={FIB_CONFLUENCE_LEVELS}, tolerans=±%{FIB_CONFLUENCE_TOLERANCE*100:.0f}, RSI oversold<{RSI_OVERSOLD_THRESHOLD} (long) / overbought>{RSI_OVERBOUGHT_THRESHOLD} (short)")
     log_status(f"   İzleme sınırı    : toplam mesafe ≤ %{WATCHLIST_MAX_COMBINED_DIST_PCT:.0f}")
 
 
@@ -690,6 +694,7 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
         "current_price"        : round(float(current_price), 6),
         "current_rsi"          : round(float(current_rsi), 2),
         "rsi_oversold"          : bool(current_rsi < RSI_OVERSOLD_THRESHOLD),
+        "rsi_overbought"        : bool(current_rsi > RSI_OVERBOUGHT_THRESHOLD),
         "swing_1_leg_id"         : swing_i["leg_id"],
         "swing_1_duration_bars"  : swing_i["duration_bars"],
         "swing_1_a_type"        : swing_i["a_type"],
@@ -721,54 +726,70 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
 def evaluate_confluence_entry(df, candidate, equity=1000, risk_pct=0.015):
     """
     ══════════════════════════════════════════════════════════════
-    YENI ANA GATE (2026-07-10 pivot): Confluence artik birincil strateji,
-    Double Bottom bonus/confidence katmanina indirgendi (eskiden tam
-    tersiydi). Kullanicinin gercek giris mantigi: iki bagimsiz swing'in
-    retracement + extension seviyelerinin fiyatta cakismasi.
+    ANA GATE (2026-07-10 pivot + short ekleme). Confluence birincil
+    strateji; Double Bottom/Top bonus/confidence katmani.
+
+    YÖN (2026-07-10, 2. ekleme): Confluence seviye tespiti yön bağımsız
+    (aynı matematik). Yönü belirleyen RSI:
+      candidate["rsi_oversold"]   (RSI<35) → LONG
+      candidate["rsi_overbought"] (RSI>65) → SHORT
+      İkisi de değilse (nötr RSI)          → sinyal yok
 
     GATE (ikisi de zorunlu):
-      1) candidate["within_tolerance"] - HEM swing_1 HEM swing_2'nin
-         fib seviyesi guncel fiyata FIB_CONFLUENCE_TOLERANCE icinde
-      2) candidate["rsi_oversold"] - RSI < RSI_OVERSOLD_THRESHOLD
+      1) candidate["within_tolerance"]
+      2) rsi_oversold (LONG) VEYA rsi_overbought (SHORT)
 
     CONFIDENCE (gate gectikten sonra kademelendirir):
-      low    = sadece gate
-      medium = gate + Double Bottom YAPISI var (2 dip + mesafe + tolerans,
-               kirilim/hacim/RSI/fib şart degil - sadece yapi)
-      high   = gate + Double Bottom TAM TEYITLI (evaluate_signal.is_valid)
-               yani kirilim+hacim+RSI diverjans+fib bandi da AYRICA saglanmis
+      LONG:  medium = Double Bottom yapısı | high = Double Bottom tam teyitli
+      SHORT: medium = Double Top yapısı    | high = Double Top tam teyitli
 
-    RISK: stop ATR bazli (confidence'tan bagimsiz), pozisyon 0.5R/1.0R/1.5R.
+    RISK: stop ATR bazlı - LONG'da entry'nin ALTINA, SHORT'ta entry'nin
+    ÜSTÜNE (compute_stop_and_size'ın direction parametresi). Pozisyon
+    0.5R/1.0R/1.5R aynı şekilde.
 
-    Donus: None (gate gecmedi) VEYA dict (sinyal detaylari).
+    Donus: None (gate gecmedi/RSI notr) VEYA dict (sinyal detaylari,
+    "direction": "long"|"short" alanıyla).
     ══════════════════════════════════════════════════════════════
     """
-    if candidate is None or not candidate.get("within_tolerance") or not candidate.get("rsi_oversold"):
+    if candidate is None or not candidate.get("within_tolerance"):
         return None
+
+    if candidate.get("rsi_oversold"):
+        direction = "long"
+    elif candidate.get("rsi_overbought"):
+        direction = "short"
+    else:
+        return None  # RSI notr bolgede - ne long ne short
 
     entry_price = candidate["current_price"]
 
-    db = check_double_bottom(df)
-    double_bottom_structure = "low1_idx" in db
+    if direction == "long":
+        db = check_double_bottom(df)
+        structure_present = "low1_idx" in db
+        full_validation = evaluate_signal(df)
+        fully_confirmed = bool(full_validation.is_valid)
+    else:
+        dt = check_double_top(df)
+        structure_present = "high1_idx" in dt
+        full_validation = evaluate_signal_short(df)
+        fully_confirmed = bool(full_validation.is_valid)
 
-    full_db_validation = evaluate_signal(df)
-    double_bottom_fully_confirmed = bool(full_db_validation.is_valid)
-
-    if double_bottom_fully_confirmed:
+    if fully_confirmed:
         confidence = "high"
-    elif double_bottom_structure:
+    elif structure_present:
         confidence = "medium"
     else:
         confidence = "low"
 
-    risk_calc = compute_stop_and_size(df, entry_price, equity, risk_pct)
+    risk_calc = compute_stop_and_size(df, entry_price, equity, risk_pct, direction=direction)
     position_multiplier = {"low": 0.5, "medium": 1.0, "high": 1.5}[confidence]
     position_size = risk_calc["position_size"] * position_multiplier
 
     return {
+        "direction": direction,
         "confidence": confidence,
-        "double_bottom_structure": double_bottom_structure,
-        "double_bottom_fully_confirmed": double_bottom_fully_confirmed,
+        "structure_present": structure_present,
+        "fully_confirmed": fully_confirmed,
         "entry_price": round(float(entry_price), 6),
         "stop_price": round(float(risk_calc["stop_price"]), 6),
         "position_size": round(float(position_size), 6),
@@ -831,7 +852,7 @@ def write_signal_outputs(validation_results, watchlist_results, skipped_data, sk
     for v in validation_results:
         log_signal(
             f"✅  {v['symbol']:<16} | confidence={v['confidence']:<6} | "
-            f"db_yapi={v['double_bottom_structure']} | db_tam_teyit={v['double_bottom_fully_confirmed']} | "
+            f"yön={v['direction']:<5} | yapı={v['structure_present']} | tam_teyit={v['fully_confirmed']} | "
             f"entry={v['entry_price']} | stop={v['stop_price']} | pos_size={v['position_size']}"
         )
 
@@ -958,8 +979,8 @@ def run_scanner():
                 reasons = []
                 if not candidate.get("within_tolerance"):
                     reasons.append(f"Confluence tolerans dışı (toplam mesafe %{candidate['combined_dist_pct']})")
-                if not candidate.get("rsi_oversold"):
-                    reasons.append(f"RSI oversold değil (RSI={candidate['current_rsi']})")
+                if not candidate.get("rsi_oversold") and not candidate.get("rsi_overbought"):
+                    reasons.append(f"RSI ne oversold(<{RSI_OVERSOLD_THRESHOLD}) ne overbought(>{RSI_OVERBOUGHT_THRESHOLD}) (RSI={candidate['current_rsi']})")
                 log_signal(f"ℹ️  [Confluence] {symbol:<16} reddedildi | reasons={reasons}")
 
                 # Gate'i tam geçemedi ama toplam mesafesi makul bir sınırın
@@ -1098,8 +1119,9 @@ def run_scanner():
     col_map = {
         "symbol"                        : "Sembol",
         "confidence"                     : "Güven",
-        "double_bottom_structure"        : "Double Bottom Yapısı Var mı",
-        "double_bottom_fully_confirmed"  : "Double Bottom Tam Teyitli mi",
+        "direction"                       : "Yön",
+        "structure_present"               : "Yapı Var mı (DB/DT)",
+        "fully_confirmed"                 : "Tam Teyitli mi (DB/DT)",
         "entry_price"                    : "Giriş Fiyatı",
         "stop_price"                     : "Stop Fiyatı",
         "position_size"                  : "Pozisyon Büyüklüğü",
@@ -1180,8 +1202,9 @@ def debug_test_symbol(test_symbol, debug=True):
 
     if confluence_signal_t is not None:
         log_status(f"\n   ✅  SİNYAL GEÇERLİ — confidence={confluence_signal_t['confidence']}")
-        log_status(f"      double_bottom_structure       : {confluence_signal_t['double_bottom_structure']}")
-        log_status(f"      double_bottom_fully_confirmed : {confluence_signal_t['double_bottom_fully_confirmed']}")
+        log_status(f"      direction                     : {confluence_signal_t['direction']}")
+        log_status(f"      structure_present             : {confluence_signal_t['structure_present']}")
+        log_status(f"      fully_confirmed               : {confluence_signal_t['fully_confirmed']}")
         log_status(f"      entry_price : {confluence_signal_t['entry_price']}")
         log_status(f"      stop_price  : {confluence_signal_t['stop_price']}")
         log_status(f"      position_size: {confluence_signal_t['position_size']}")
@@ -1189,8 +1212,8 @@ def debug_test_symbol(test_symbol, debug=True):
         reasons = []
         if not candidate_t.get("within_tolerance"):
             reasons.append(f"Confluence tolerans dışı (toplam mesafe %{candidate_t['combined_dist_pct']})")
-        if not candidate_t.get("rsi_oversold"):
-            reasons.append(f"RSI oversold değil (RSI={candidate_t['current_rsi']})")
+        if not candidate_t.get("rsi_oversold") and not candidate_t.get("rsi_overbought"):
+            reasons.append(f"RSI ne oversold(<{RSI_OVERSOLD_THRESHOLD}) ne overbought(>{RSI_OVERBOUGHT_THRESHOLD}) (RSI={candidate_t['current_rsi']})")
         log_status(f"\n   ❌  Gate reddedildi. reasons={reasons}")
 
         if (not candidate_t["within_tolerance"]
