@@ -418,6 +418,115 @@ def find_zigzag_pivots(df, pct_threshold=ZIGZAG_PCT_THRESHOLD):
     return pivots
 
 
+def find_big_wave_abc_pattern(df, max_report_dist_pct=20.0):
+    """
+    ══════════════════════════════════════════════════════════════
+    EK / BAĞIMSIZ RAPOR — find_confluence_candidates'tan TAMAMEN AYRI,
+    onu hiçbir şekilde etkilemez, ana gate'e girmez. Sadece ayrı bir
+    CSV'ye (okx_big_wave_abc.csv) yazılır.
+
+    DESEN: "Büyük dalganın retracement'i" + "ondan SONRA gelen küçük,
+    bağımsız bir ABC düzeltmesinin extension'ı" (C henüz tamamlanmamış
+    olabilir - bu yüzden extension bir PROJEKSİYON/hedef olarak
+    kullanılıyor, kesinleşmiş bir nokta değil).
+
+      1) Büyük dalga = zigzag pivotları arasındaki TÜM bacaklar içinde
+         fiyat aralığı (|B-A|) EN BÜYÜK olan tek bacak.
+      2) Bu büyük dalganın retracement seviyeleri (0.618/0.786) hesaplanır.
+      3) Büyük dalganın bitişinden SONRA gelen, onunla ortak nokta
+         paylaşmayan bacaklar arasından EN GÜNCEL (kronolojik son) olanı
+         "küçük ABC bacağı" olarak seçilir - bu, düzeltmenin henüz
+         tamamlanmamış "C" ayağını temsil eder. Bu bacağın extension
+         seviyeleri (1.272/1.618) hesaplanır - yani "C nereye gidebilir"
+         projeksiyonu.
+      4) Büyük dalga retracement'i ile küçük bacak extension'ı arasından,
+         GÜNCEL FİYATA toplam mesafesi en küçük kombinasyon seçilir.
+
+    Donus: None (yeterli bacak yok VEYA en iyi eslesme bile cok uzak)
+    VEYA detay dict.
+    ══════════════════════════════════════════════════════════════
+    """
+    pivots = find_zigzag_pivots(df)
+    if len(pivots) < 4:
+        return None
+
+    current_price = df["close"].iloc[-1]
+
+    legs = []
+    for k in range(len(pivots) - 1):
+        p_a, p_b = pivots[k], pivots[k + 1]
+        if abs(p_b["price"] - p_a["price"]) <= 0:
+            continue
+        legs.append({
+            "leg_id": k,
+            "a_type": p_a["type"], "a_price": p_a["price"], "a_time": p_a["time"],
+            "b_type": p_b["type"], "b_price": p_b["price"], "b_time": p_b["time"],
+            "magnitude": abs(p_b["price"] - p_a["price"]),
+        })
+    if not legs:
+        return None
+
+    big_wave = max(legs, key=lambda l: l["magnitude"])
+    big_retracement = compute_fib_levels(big_wave["a_price"], big_wave["b_price"], big_wave["a_type"], RETRACEMENT_RATIOS)
+
+    candidate_legs = [
+        l for l in legs
+        if l["leg_id"] != big_wave["leg_id"]
+        and l["a_time"] > big_wave["b_time"]
+        and l["a_time"] not in (big_wave["a_time"], big_wave["b_time"])
+        and l["b_time"] not in (big_wave["a_time"], big_wave["b_time"])
+    ]
+    if not candidate_legs:
+        return None
+
+    small_leg = max(candidate_legs, key=lambda l: l["leg_id"])
+    small_extension = compute_fib_levels(small_leg["a_price"], small_leg["b_price"], small_leg["a_type"], EXTENSION_RATIOS)
+
+    best = None
+    for ratio_big, level_big in big_retracement.items():
+        if level_big <= 0:
+            continue
+        dist_big = abs(current_price - level_big) / level_big
+        for ratio_small, level_small in small_extension.items():
+            if level_small <= 0:
+                continue
+            dist_small = abs(current_price - level_small) / level_small
+            combined = dist_big + dist_small
+            if best is None or combined < best["combined_dist"]:
+                best = {
+                    "combined_dist": combined,
+                    "ratio_big": ratio_big, "level_big": level_big, "dist_big": dist_big,
+                    "ratio_small": ratio_small, "level_small": level_small, "dist_small": dist_small,
+                }
+
+    if best is None or best["combined_dist"] * 100 > max_report_dist_pct:
+        return None
+
+    within_tolerance = (
+        best["dist_big"] <= FIB_CONFLUENCE_TOLERANCE and best["dist_small"] <= FIB_CONFLUENCE_TOLERANCE
+    )
+
+    return {
+        "current_price": round(float(current_price), 6),
+        "big_wave_a_type": big_wave["a_type"], "big_wave_a_price": round(float(big_wave["a_price"]), 6),
+        "big_wave_a_time": big_wave["a_time"].isoformat(),
+        "big_wave_b_type": big_wave["b_type"], "big_wave_b_price": round(float(big_wave["b_price"]), 6),
+        "big_wave_b_time": big_wave["b_time"].isoformat(),
+        "big_wave_retracement_ratio": best["ratio_big"],
+        "big_wave_retracement_price": round(float(best["level_big"]), 6),
+        "big_wave_dist_pct": round(float(best["dist_big"]) * 100, 3),
+        "small_leg_a_type": small_leg["a_type"], "small_leg_a_price": round(float(small_leg["a_price"]), 6),
+        "small_leg_a_time": small_leg["a_time"].isoformat(),
+        "small_leg_b_type": small_leg["b_type"], "small_leg_b_price": round(float(small_leg["b_price"]), 6),
+        "small_leg_b_time": small_leg["b_time"].isoformat(),
+        "small_leg_c_extension_ratio": best["ratio_small"],
+        "small_leg_c_extension_price": round(float(best["level_small"]), 6),
+        "small_leg_dist_pct": round(float(best["dist_small"]) * 100, 3),
+        "combined_dist_pct": round(float(best["combined_dist"]) * 100, 3),
+        "within_tolerance": bool(within_tolerance),
+    }
+
+
 def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
     """
     ══════════════════════════════════════════════════════════════
@@ -776,6 +885,7 @@ def run_scanner():
     # girdisi olarak akıyorlar. Tek gerçek sinyal listesi: validation_results.
     validation_results = []
     watchlist_results   = []
+    abc_pattern_results = []   # EK/BAĞIMSIZ rapor - ana gate'i etkilemez
     skipped_data        = 0
     skipped_crit         = 0
     previous_watchlist_state = load_previous_watchlist_state()
@@ -800,6 +910,25 @@ def run_scanner():
         # Motor 1 (A-B/ABC) artik hic kullanilmiyor - confluence zaten
         # onun yaptigi isin daha guclu (2-swing) versiyonu.
         candidate, no_candidate_reason = find_confluence_candidates(df)
+
+        # EK/BAĞIMSIZ rapor: büyük dalga retracement'i + küçük ABC
+        # düzeltmesinin extension'ı. Ana gate'i, confidence'ı veya
+        # watchlist'i HİÇBİR ŞEKİLDE etkilemez - sadece ayrı bir CSV'ye
+        # yazılır. try/except ile korunuyor: burada bir hata olursa ana
+        # tarama asla etkilenmemeli.
+        try:
+            abc_pattern = find_big_wave_abc_pattern(df)
+        except Exception as exc:
+            abc_pattern = None
+            log_status(f"⚠️  [Büyük Dalga ABC] {symbol} için hata (yok sayıldı): {exc}")
+        if abc_pattern is not None:
+            abc_pattern["symbol"] = symbol
+            abc_pattern_results.append(abc_pattern)
+            log_signal(
+                f"🌊  [Büyük Dalga ABC] {symbol:<16} | büyük {abc_pattern['big_wave_retracement_ratio']}@%{abc_pattern['big_wave_dist_pct']} | "
+                f"küçük-C {abc_pattern['small_leg_c_extension_ratio']}@%{abc_pattern['small_leg_dist_pct']} | "
+                f"toplam=%{abc_pattern['combined_dist_pct']} | tolerans_içinde={abc_pattern['within_tolerance']}"
+            )
         vol_24h = volume_by_symbol.get(symbol)
 
         confluence_signal = evaluate_confluence_entry(df, candidate)
@@ -924,6 +1053,42 @@ def run_scanner():
             watch_fn = "okx_watchlist.csv"
             df_watch.to_csv(watch_fn, index=False, encoding="utf-8-sig")
             log_status(f"👀  CSV (İzleme Listesi, {len(df_watch)} coin) → {watch_fn}")
+
+    # ── Büyük Dalga + ABC Deseni CSV'si (EK/BAĞIMSIZ, 0 olsa bile yazılır) ──
+    if abc_pattern_results:
+        abc_col_map = {
+            "symbol"                       : "Sembol",
+            "combined_dist_pct"            : "Toplam Mesafe%",
+            "within_tolerance"             : "Tolerans İçinde mi",
+            "big_wave_retracement_ratio"   : "Büyük Dalga Retracement Oranı",
+            "big_wave_retracement_price"   : "Büyük Dalga Retracement Fiyatı",
+            "big_wave_dist_pct"            : "Büyük Dalga Uzaklık%",
+            "big_wave_a_type"              : "Büyük Dalga A Tipi",
+            "big_wave_a_price"             : "Büyük Dalga A Fiyatı",
+            "big_wave_a_time"              : "Büyük Dalga A Zamanı",
+            "big_wave_b_type"              : "Büyük Dalga B Tipi",
+            "big_wave_b_price"             : "Büyük Dalga B Fiyatı",
+            "big_wave_b_time"              : "Büyük Dalga B Zamanı",
+            "small_leg_c_extension_ratio"  : "Küçük Bacak C Extension Oranı",
+            "small_leg_c_extension_price"  : "Küçük Bacak C Extension Fiyatı",
+            "small_leg_dist_pct"           : "Küçük Bacak Uzaklık%",
+            "small_leg_a_type"             : "Küçük Bacak A Tipi",
+            "small_leg_a_price"            : "Küçük Bacak A Fiyatı",
+            "small_leg_a_time"             : "Küçük Bacak A Zamanı",
+            "small_leg_b_type"             : "Küçük Bacak B Tipi (C öncesi)",
+            "small_leg_b_price"            : "Küçük Bacak B Fiyatı (C öncesi)",
+            "small_leg_b_time"             : "Küçük Bacak B Zamanı (C öncesi)",
+            "current_price"                : "Güncel Fiyat",
+        }
+        df_abc = pd.DataFrame(abc_pattern_results)
+        df_abc = df_abc[[c for c in abc_col_map if c in df_abc.columns]]
+        df_abc = df_abc.rename(columns=abc_col_map)
+        df_abc = df_abc.sort_values("Toplam Mesafe%").reset_index(drop=True)
+
+        if EXPORT_CSV:
+            abc_fn = "okx_big_wave_abc.csv"
+            df_abc.to_csv(abc_fn, index=False, encoding="utf-8-sig")
+            log_status(f"🌊  CSV (Büyük Dalga ABC, {len(df_abc)} coin) → {abc_fn}")
 
     if not validation_results:
         log_status("\n❌  Hiç aday bulunamadı (Confluence gate'ini geçen sinyal yok).")
