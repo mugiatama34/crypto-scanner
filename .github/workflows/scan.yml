@@ -22,11 +22,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Onceki tur watchlist_state.json'unu geri yukler (momentum
-      # karsilastirmasi icin). restore-keys sayesinde tam eslesme
-      # bulunamazsa en yakin onceki cache kullanilir. Ilk calistirmada
-      # veya cache kaybolursa dosya bulunmaz - script bunu None/"yeni"
-      # olarak ele alir, hata vermez.
       - name: Restore watchlist state cache
         uses: actions/cache/restore@v4
         with:
@@ -42,9 +37,6 @@ jobs:
           OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
         run: python okx_double_bottom_divergence_v1.py
 
-      # Bu turun state'ini bir sonraki tur icin kaydeder. Her run_id
-      # benzersiz oldugundan her zaman yeni bir cache girdisi olusur;
-      # restore-keys bir sonraki calistirmada en guncelini bulur.
       - name: Save watchlist state cache
         if: always()
         uses: actions/cache/save@v4
@@ -62,5 +54,6 @@ jobs:
             signals.log
             okx_double_bottom_signals.csv
             okx_watchlist.csv
+            okx_big_wave_abc.csv
           if-no-files-found: ignore
           retention-days: 30
