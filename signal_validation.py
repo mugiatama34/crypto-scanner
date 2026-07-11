@@ -57,6 +57,16 @@ def find_local_lows(series: pd.Series, order: int = 3) -> list:
     return lows
 
 
+def find_local_highs(series: pd.Series, order: int = 3) -> list:
+    """find_local_lows'un aynasi: her iki tarafinda 'order' bar daha dusuk olan noktalar."""
+    highs = []
+    for i in range(order, len(series) - order):
+        window = series.iloc[i - order: i + order + 1]
+        if series.iloc[i] == window.max():
+            highs.append(i)
+    return highs
+
+
 # ---------------------------------------------------------------------------
 # Sonuc objesi
 # ---------------------------------------------------------------------------
@@ -148,6 +158,69 @@ def check_double_bottom(df: pd.DataFrame, min_bar_gap: int = 8,
 
 
 # ---------------------------------------------------------------------------
+# 1b) Double Top yapisi (Murphy) - check_double_bottom'un SHORT aynasi
+# ---------------------------------------------------------------------------
+
+def check_double_top(df: pd.DataFrame, min_bar_gap: int = 8,
+                      level_tolerance: float = 0.05,
+                      volume_breakdown_mult: float = 1.3,
+                      breakdown_window: int = 3) -> dict:
+    highs = find_local_highs(df["high"], order=3)
+
+    if len(highs) < 2:
+        return {"passed": False, "reason": "Yeterli sayida tepe bulunamadi"}
+
+    high2_idx, high1_idx = highs[-1], highs[-2]
+    if high2_idx - high1_idx < min_bar_gap:
+        return {"passed": False, "reason": f"Tepeler arasi mesafe yetersiz ({high2_idx - high1_idx} bar < {min_bar_gap})"}
+
+    high1_price = df["high"].iloc[high1_idx]
+    high2_price = df["high"].iloc[high2_idx]
+    level_diff = abs(high2_price - high1_price) / high1_price
+    if level_diff > level_tolerance:
+        return {"passed": False, "reason": f"Tepe seviyeleri farkli (%{level_diff*100:.2f} > tolerans)"}
+
+    mid_slice = df.iloc[high1_idx:high2_idx + 1]
+    trough_mid = mid_slice["low"].min()
+
+    avg_vol_20 = df["volume"].iloc[-21:-1].mean()
+
+    # check_double_bottom'daki ayni mantik: son `breakdown_window` bar
+    # icinde kirilim (trough_mid'in ALTINA kapanis) + hacim spike'i ayni
+    # barda mi cakisiyor.
+    breakdown_confirmed = False
+    volume_ok = False
+    breakdown_bars_ago = None
+    for offset in range(1, breakdown_window + 1):
+        bar = df.iloc[-offset]
+        if bar["close"] >= trough_mid:
+            continue
+        vol_ok_this_bar = bar["volume"] > avg_vol_20 * volume_breakdown_mult
+        if not breakdown_confirmed:
+            breakdown_confirmed = True
+            volume_ok = vol_ok_this_bar
+            breakdown_bars_ago = offset
+        if vol_ok_this_bar:
+            volume_ok = True
+            breakdown_bars_ago = offset
+            break
+
+    passed = breakdown_confirmed and volume_ok
+    return {
+        "passed": passed,
+        "high1_idx": high1_idx, "high2_idx": high2_idx,
+        "high1_price": high1_price, "high2_price": high2_price,
+        "trough_mid": trough_mid,
+        "breakdown_confirmed": breakdown_confirmed,
+        "volume_ok": volume_ok,
+        "breakdown_bars_ago": breakdown_bars_ago,
+        "reason": None if passed else "Kirilim (asagi) teyidi veya hacim kosulu saglanmadi",
+    }
+
+
+
+
+# ---------------------------------------------------------------------------
 # 2) RSI Positive Divergence (Nison)
 # ---------------------------------------------------------------------------
 
@@ -179,6 +252,40 @@ def check_rsi_divergence(df: pd.DataFrame, low1_idx: int, low2_idx: int,
         "passed": passed,
         "rsi1": rsi1, "rsi2": rsi2,
         "bar_gap": low2_idx - low1_idx,
+        "reason": reason,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 2b) RSI Negative Divergence (Nison) - check_rsi_divergence'in SHORT aynasi
+# ---------------------------------------------------------------------------
+
+def check_rsi_negative_divergence(df: pd.DataFrame, high1_idx: int, high2_idx: int,
+                                   overbought_threshold: float = 65,
+                                   min_rsi_gap: float = 5,
+                                   min_bar_gap: int = 6) -> dict:
+    rsi = compute_rsi(df["close"])
+    rsi1, rsi2 = rsi.iloc[high1_idx], rsi.iloc[high2_idx]
+    price1, price2 = df["high"].iloc[high1_idx], df["high"].iloc[high2_idx]
+
+    price_condition = price2 >= price1          # fiyat esit/daha yuksek tepe yapiyor
+    rsi_condition = rsi2 < rsi1                  # RSI daha DUSUK tepe yapiyor (negatif diverjans)
+    overbought_condition = rsi1 > overbought_threshold
+    gap_condition = (rsi1 - rsi2) >= min_rsi_gap
+    bar_distance_condition = (high2_idx - high1_idx) >= min_bar_gap
+
+    passed = (price_condition and rsi_condition and overbought_condition
+              and gap_condition and bar_distance_condition)
+    reason = None
+    if not passed:
+        if not bar_distance_condition:
+            reason = f"Diverjans bar mesafesi yetersiz ({high2_idx - high1_idx} bar < {min_bar_gap})"
+        else:
+            reason = "RSI negatif diverjans kosullari saglanmadi"
+    return {
+        "passed": passed,
+        "rsi1": rsi1, "rsi2": rsi2,
+        "bar_gap": high2_idx - high1_idx,
         "reason": reason,
     }
 
@@ -299,22 +406,82 @@ def check_elliott_sanity(df: pd.DataFrame, major_swing_high: float,
 # ---------------------------------------------------------------------------
 
 def compute_stop_and_size(df: pd.DataFrame, entry_price: float, equity: float,
-                           risk_pct: float = 0.015, atr_mult: float = 3.0) -> dict:
+                           risk_pct: float = 0.015, atr_mult: float = 3.0,
+                           direction: str = "long") -> dict:
+    """direction='long': stop entry'nin ALTINA (ATR bazli) konur.
+    direction='short': stop entry'nin ÜSTÜNE konur. Pozisyon buyuklugu
+    hesabi (risk_pct * equity / stop_distance) her iki yonde de aynidir -
+    ATR bazli stop mesafesi degismez, sadece yonu degisir."""
     atr = compute_atr(df).iloc[-1]
     stop_distance = atr_mult * atr
-    stop_price = entry_price - stop_distance
+    if direction == "short":
+        stop_price = entry_price + stop_distance
+    else:
+        stop_price = entry_price - stop_distance
     position_size = (equity * risk_pct) / stop_distance
     return {
         "atr": atr,
         "stop_distance": stop_distance,
         "stop_price": stop_price,
         "position_size": position_size,
+        "direction": direction,
     }
 
 
 # ---------------------------------------------------------------------------
 # Ana degerlendirme fonksiyonu
 # ---------------------------------------------------------------------------
+
+def evaluate_signal_short(df: pd.DataFrame, swing_high: float = None, swing_low: float = None,
+                           equity: float = 1000, risk_pct: float = 0.015) -> SignalResult:
+    """
+    evaluate_signal()'in SHORT aynasi. GATE:
+      1) Double Top yapisi (kirilim asagi + hacim)
+      2) RSI negatif diverjans >=5 puan VE iki tepe arasi >=6 bar
+      3) Fiyat Fibonacci 0.618-0.786 bandinda (check_fibonacci_zone yon
+         bagimsiz - sadece bir bant kontrolu, aynen yeniden kullanilir)
+
+    NOT: evaluate_confluence_entry() bu fonksiyonu SADECE `.is_valid`
+    icin cagirir (short confidence icin "tam teyitli" tier'ini belirlemek
+    amacli) - bu yuzden Wyckoff/Motor3/bonus katmanlarini (evaluate_signal
+    ile ayni ayrintida) tekrar etmiyor, sadece 3 temel gate kontrol edilir.
+    """
+    result = SignalResult()
+
+    if swing_high is None:
+        swing_high = df["high"].iloc[-60:].max()
+    if swing_low is None:
+        swing_low = df["low"].iloc[-60:].min()
+
+    dt = check_double_top(df)
+    result.checks["double_top"] = dt
+    if not dt["passed"]:
+        result.reasons.append(f"Double Top: {dt['reason']}")
+        return result
+
+    rsi_check = check_rsi_negative_divergence(df, dt["high1_idx"], dt["high2_idx"])
+    result.checks["rsi_negative_divergence"] = rsi_check
+    if not rsi_check["passed"]:
+        result.reasons.append(f"RSI Negative Divergence: {rsi_check['reason']}")
+        return result
+
+    fib_check = check_fibonacci_zone(df, swing_high, swing_low)
+    result.checks["fibonacci_zone"] = fib_check
+    result.fib_zone = fib_check["zone"]
+    if not fib_check["passed"]:
+        result.reasons.append(f"Fibonacci Zone: {fib_check['reason']}")
+        return result
+
+    entry_price = df["close"].iloc[-1]
+    risk_calc = compute_stop_and_size(df, entry_price, equity, risk_pct, direction="short")
+    result.checks["risk"] = risk_calc
+    result.stop_price = risk_calc["stop_price"]
+    result.position_size = risk_calc["position_size"]
+
+    result.is_valid = True
+    result.confidence = "low"  # evaluate_confluence_entry kendi confidence'ini ayrica hesaplar
+    return result
+
 
 def evaluate_signal(df: pd.DataFrame, swing_high: float = None, swing_low: float = None,
                      major_swing_high: float = None, major_swing_low: float = None,
