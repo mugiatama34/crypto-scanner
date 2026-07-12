@@ -91,27 +91,63 @@ _console_handler.setLevel(logging.WARNING)
 logger.addHandler(_console_handler)
 
 
-def load_previous_watchlist_state():
-    """Onceki tarama turunun watchlist snapshot'ini yukler (GitHub Actions
-    cache'inden gelir). Dosya yoksa veya bozuksa bos dict doner - sistem
-    kendi kendini onarir, hata firlatmaz."""
+TELEGRAM_COOLDOWN_HOURS = float(os.environ.get("TELEGRAM_COOLDOWN_HOURS", 4))
+
+
+def _load_state_file():
+    """STATE_FILE'i butun olarak yukler: {'watchlist': {...}, 'telegram_notified': {...}}.
+    Dosya yoksa/bozuksa/eski formattaysa (duz watchlist dict'i) bos/uyumlu
+    bir yapiya geri doner - sistem kendi kendini onarir, hata firlatmaz."""
     if not os.path.exists(STATE_FILE):
-        return {}
+        return {"watchlist": {}, "telegram_notified": {}}
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            raw = json.load(f)
+        if "watchlist" in raw or "telegram_notified" in raw:
+            return {"watchlist": raw.get("watchlist", {}), "telegram_notified": raw.get("telegram_notified", {})}
+        # Eski format (2026-07-10 oncesi): dosyanin tamami duz watchlist dict'iydi.
+        return {"watchlist": raw, "telegram_notified": {}}
     except Exception as exc:
-        log_status(f"⚠️  Onceki watchlist state okunamadi, sifirdan baslaniyor ({exc})")
-        return {}
+        log_status(f"⚠️  Onceki state okunamadi, sifirdan baslaniyor ({exc})")
+        return {"watchlist": {}, "telegram_notified": {}}
 
 
-def save_watchlist_state(watchlist_results):
-    """Bu turun watchlist sonuclarini bir sonraki tur icin kaydeder
-    (GitHub Actions cache adimi bunu tasir). reference_id, hangi 2 swing'in
-    karsilastirildigini parmak izi olarak tutar - boylece bir sonraki tur,
-    ayni swing ciftiyle mi kiyaslandigini yoksa referansin degisip
-    degismedigini ayirt edebilir."""
-    state = {
+def load_previous_watchlist_state():
+    """Onceki tarama turunun watchlist snapshot'ini yukler (GitHub Actions
+    cache'inden gelir)."""
+    return _load_state_file()["watchlist"]
+
+
+def load_previous_telegram_state():
+    """Onceki tarama turunda hangi coin/yon icin ne zaman Telegram bildirimi
+    gonderildigini yukler (cooldown kontrolu icin)."""
+    return _load_state_file()["telegram_notified"]
+
+
+def should_notify_telegram(symbol, direction, previous_telegram_state, cooldown_hours=TELEGRAM_COOLDOWN_HOURS):
+    """Ayni coin+yon icin son TELEGRAM_COOLDOWN_HOURS saat icinde bildirim
+    gonderildiyse TEKRAR gondermez (spam onleme). Yon degistiyse (ornegin
+    short'tan long'a) bu YENI bilgi sayilir, cooldown'u atlar - hemen bildirir."""
+    prev = previous_telegram_state.get(symbol)
+    if prev is None:
+        return True
+    if prev.get("direction") != direction:
+        return True  # yon degisti, yeni bilgi - cooldown gecerli degil
+    try:
+        notified_at = datetime.fromisoformat(prev["notified_at"])
+    except Exception:
+        return True  # bozuk kayit - guvenli tarafta kal, bildir
+    elapsed_hours = (datetime.now(timezone.utc) - notified_at).total_seconds() / 3600
+    return elapsed_hours >= cooldown_hours
+
+
+def save_watchlist_state(watchlist_results, telegram_notified_state=None):
+    """Bu turun watchlist sonuclarini VE telegram bildirim gecmisini bir
+    sonraki tur icin kaydeder (GitHub Actions cache adimi bunu tasir).
+    reference_id, hangi 2 swing'in karsilastirildigini parmak izi olarak
+    tutar - boylece bir sonraki tur, ayni swing ciftiyle mi kiyaslandigini
+    yoksa referansin degisip degismedigini ayirt edebilir."""
+    watchlist_state = {
         entry["symbol"]: {
             "distance_pct": entry.get("combined_dist_pct"),
             "reference_id": entry.get("reference_id"),
@@ -119,8 +155,12 @@ def save_watchlist_state(watchlist_results):
         }
         for entry in watchlist_results
     }
+    full_state = {
+        "watchlist": watchlist_state,
+        "telegram_notified": telegram_notified_state or {},
+    }
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+        json.dump(full_state, f, indent=2, ensure_ascii=False)
 
 
 def compute_momentum(symbol, current_distance_pct, previous_state, current_reference_id=None):
@@ -967,6 +1007,8 @@ def run_scanner():
     skipped_data        = 0
     skipped_crit         = 0
     previous_watchlist_state = load_previous_watchlist_state()
+    previous_telegram_state = load_previous_telegram_state()
+    telegram_notified_this_run = dict(previous_telegram_state)  # kopya - bu tur guncellenecek
     log_status(f"📈  Onceki tur state: {len(previous_watchlist_state)} coin (momentum karsilastirmasi icin)")
 
     for symbol in tqdm(usdt_pairs, desc="🔍 Taranıyor", unit="coin"):
@@ -1021,9 +1063,16 @@ def run_scanner():
                 f"swing2={confluence_signal['swing_2_fib_ratio']}@%{confluence_signal['swing_2_dist_pct']} | "
                 f"stop={confluence_signal['stop_price']} | pos_size={confluence_signal['position_size']}"
             )
-            telegram_text = format_signal_telegram_message(confluence_signal)
-            if send_telegram_message(telegram_text):
-                log_status(f"📨  Telegram bildirimi gönderildi → {symbol}")
+            if should_notify_telegram(symbol, confluence_signal["direction"], previous_telegram_state):
+                telegram_text = format_signal_telegram_message(confluence_signal)
+                if send_telegram_message(telegram_text):
+                    log_status(f"📨  Telegram bildirimi gönderildi → {symbol}")
+                    telegram_notified_this_run[symbol] = {
+                        "direction": confluence_signal["direction"],
+                        "notified_at": datetime.now(timezone.utc).isoformat(),
+                    }
+            else:
+                log_status(f"🔕  Telegram bildirimi atlandı (cooldown, {TELEGRAM_COOLDOWN_HOURS}sa) → {symbol}")
         else:
             skipped_crit += 1
             if candidate is None:
@@ -1094,7 +1143,7 @@ def run_scanner():
     log_status(f"  ✅  Eşleşen (Confluence — tek strateji): {len(validation_results)}")
 
     write_signal_outputs(validation_results, watchlist_results, skipped_data, skipped_crit, total)
-    save_watchlist_state(watchlist_results)
+    save_watchlist_state(watchlist_results, telegram_notified_this_run)
 
     # ── İzleme Listesi CSV'si (0 sinyal olsa bile HER ZAMAN yazılır) ──
     if watchlist_results:
