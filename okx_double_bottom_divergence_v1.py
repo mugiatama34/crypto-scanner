@@ -49,6 +49,7 @@ import ccxt
 import json
 import logging
 import os
+import requests
 import time
 import warnings
 from datetime import datetime, timezone
@@ -152,6 +153,60 @@ def compute_momentum(symbol, current_distance_pct, previous_state, current_refer
     else:
         trend = "sabit"
     return momentum, trend
+
+
+
+# ── TELEGRAM BİLDİRİMLERİ ──────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID")
+
+
+def send_telegram_message(text):
+    """Telegram Bot API'ye HTML formatlı mesaj gönderir. Kimlik bilgisi
+    eksikse veya ağ hatası olursa SESSİZCE atlar (uyarı loglar) - bildirim
+    hatası ana taramayı ASLA durdurmamalı."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        resp = requests.post(
+            url,
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            log_status(f"⚠️  Telegram gönderim hatası ({resp.status_code}): {resp.text[:200]}")
+            return False
+        return True
+    except Exception as exc:
+        log_status(f"⚠️  Telegram gönderim hatası (ağ): {exc}")
+        return False
+
+
+def format_signal_telegram_message(signal):
+    """Confluence sinyalini Telegram icin okunakli HTML mesajina cevirir."""
+    direction_label = "🟢 LONG" if signal["direction"] == "long" else "🔴 SHORT"
+    confidence_emoji = {"low": "🟡", "medium": "🟠", "high": "🟢"}.get(signal["confidence"], "⚪")
+
+    return (
+        f"{direction_label} — <b>{signal['symbol']}</b>\n"
+        f"Güven: {confidence_emoji} {signal['confidence'].upper()}\n"
+        f"\n"
+        f"Giriş: <code>{signal['entry_price']}</code>\n"
+        f"Stop: <code>{signal['stop_price']}</code>\n"
+        f"Pozisyon: <code>{signal['position_size']}</code>\n"
+        f"\n"
+        f"Swing1: bacak{signal['swing_1_leg_id']} {signal['swing_1_fib_ratio']} → {signal['swing_1_fib_price']} (Δ%{signal['swing_1_dist_pct']})\n"
+        f"Swing2: bacak{signal['swing_2_leg_id']} {signal['swing_2_fib_ratio']} → {signal['swing_2_fib_price']} (Δ%{signal['swing_2_dist_pct']})\n"
+        f"RSI: {signal['current_rsi']}\n"
+        f"\n"
+        f"Yapı var mı: {signal['structure_present']} | Tam teyitli: {signal['fully_confirmed']}"
+    )
 
 
 
@@ -279,6 +334,8 @@ def log_settings():
     log_status(f"   Pivot Tespiti    : ZigZag ±%{ZIGZAG_PCT_THRESHOLD*100:.0f} (takvim penceresi değil, fiyat yapısından)")
     log_status(f"   Confluence       : Fib seviyeleri={FIB_CONFLUENCE_LEVELS}, tolerans=±%{FIB_CONFLUENCE_TOLERANCE*100:.0f}, RSI oversold<{RSI_OVERSOLD_THRESHOLD} (long) / overbought>{RSI_OVERBOUGHT_THRESHOLD} (short)")
     log_status(f"   İzleme sınırı    : toplam mesafe ≤ %{WATCHLIST_MAX_COMBINED_DIST_PCT:.0f}")
+    telegram_status = "✅ aktif" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "❌ yapılandırılmamış"
+    log_status(f"   Telegram         : {telegram_status}")
 
 
 # ─── FONKSİYONLAR ─────────────────────────────────────────────────────
@@ -964,6 +1021,9 @@ def run_scanner():
                 f"swing2={confluence_signal['swing_2_fib_ratio']}@%{confluence_signal['swing_2_dist_pct']} | "
                 f"stop={confluence_signal['stop_price']} | pos_size={confluence_signal['position_size']}"
             )
+            telegram_text = format_signal_telegram_message(confluence_signal)
+            if send_telegram_message(telegram_text):
+                log_status(f"📨  Telegram bildirimi gönderildi → {symbol}")
         else:
             skipped_crit += 1
             if candidate is None:
