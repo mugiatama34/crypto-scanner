@@ -697,45 +697,35 @@ def find_big_wave_abc_pattern(df, max_report_dist_pct=20.0):
 def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
     """
     ══════════════════════════════════════════════════════════════
-    CONFLUENCE ADAYI TESPITI (2026-07 refactor: artik ANA GATE'in
-    kaynagi. Eskiden "Motor 3 / Sinyal Tipi B" adiyla sadece bonus
-    puan veren bagimsiz bir tarayiciydi; artik stratejinin merkezi.)
+    CONFLUENCE ADAYI TESPITI — ANA GATE'in TEK kaynağı.
 
-    MANTIK (Boroden confluence teorisi, 2026-07-10 2. revizyon - pivot bazlı):
-      1) find_zigzag_pivots ile fiyat serisinin kendi yerel dönüş
-         noktaları (pivot high/low) bulunur - takvim pencereleri (90/60/
-         30 gün) DEĞİL. Ardışık her pivot çifti bir "bacak" (swing)
-         oluşturur. GERÇEK bağımsızlık için iki bacağın HEM A HEM B
-         noktaları birbirinden FARKLI olmalı (bitişik bacaklar bir uç
-         paylaştığı için otomatik elenir - pairing döngüsünde kontrol
-         edilir).
-      2) Her swing icin retracement (0.618/0.786) VE extension (1.272/
-         1.618) seviyeleri hesaplanir.
-      3) SADECE CAPRAZ eslesme aranir: bir swing'in RETRACEMENT seviyesi,
-         BASKA bir (A ve B'si farkli) swing'in EXTENSION seviyesiyle
-         cakisiyor mu. Iki retracement'in veya iki extension'in kendi
-         aralarinda cakismasi confluence SAYILMAZ - WIF/TRX ornegindeki
-         gercek confluence deseni budur (bir swing'in geri cekilme
-         bolgesi, baska bir swing'in projeksiyon hedefiyle ortusuyor).
-      4) TUM gecerli (swing_i, swing_j, ratio_i, ratio_j) kombinasyonlari
-         arasindan, guncel fiyata TOPLAM mesafesi (dist_i + dist_j) en
-         kucuk olan cift secilir - toleransin icinde olsun ya da olmasin.
-         Bu, hem GATE (tam eslesme) hem WATCHLIST (yaklasan ama henuz
-         tam eslesmeyen) icin TEK bir ortak kaynak olmasini saglar.
+    2026-07-13 (3. revizyon): Genel "herhangi bağımsız iki bacağın çapraz
+    eşleşmesi" yaklaşımından, SPESİFİK bir desene kilitlendi - kullanıcının
+    tarif ettiği ve TA literatüründeki popüler/klasik confluence şekli:
 
-    RSI aşırı satim SARTI BURADA UYGULANMAZ (eskiden erken donus vardi,
-    bu yuzden RSI oversold degilken watchlist adaylari hic bulunamiyordu).
-    Onun yerine current_rsi ve rsi_oversold bilgisi sonuca eklenir; GATE
-    kararini veren ust katman (run_scanner) bunu kullanir.
+      1) find_zigzag_pivots ile fiyat serisinin gerçek pivot noktaları
+         bulunur; ardışık her pivot çifti bir "bacak" oluşturur.
+      2) BÜYÜK DALGA = tüm bacaklar içinde fiyat aralığı (|B-A|) EN BÜYÜK
+         olan TEK bacak. SADECE retracement seviyeleri (0.618/0.786)
+         hesaplanır - büyük dalga hiçbir zaman extension rolünde olmaz.
+      3) KÜÇÜK ABC BACAĞI = büyük dalganın bitişinden SONRA gelen, onunla
+         ortak nokta paylaşmayan bacaklar arasından EN GÜNCEL (kronolojik
+         son) olanı. SADECE extension seviyeleri (1.272/1.618) hesaplanır -
+         henüz tamamlanmamış "C" ayağının projeksiyonu olarak yorumlanır.
+      4) Büyük dalganın retracement'i ile küçük bacağın extension'ı
+         arasından, GÜNCEL FİYATA toplam mesafesi en küçük kombinasyon
+         seçilir.
 
-    Donus: None (2'den az bagimsiz swing varsa) VEYA best-match dict:
-      {
-        ... swing_1_*/swing_2_* alanlari (eskisiyle ayni format) ...,
-        "dist_i_pct", "dist_j_pct": her ayagin ayri ayri % mesafesi,
-        "combined_dist_pct": toplam mesafe (watchlist siralamasi icin),
-        "within_tolerance": HEM dist_i HEM dist_j <= FIB_CONFLUENCE_TOLERANCE mi,
-        "current_rsi", "rsi_oversold": RSI durumu (gate karari ust katmanda),
-      }
+    NOT: Bu artık find_big_wave_abc_pattern (okx_big_wave_abc.csv) ile
+    AYNI temel mantığı kullanıyor - tek fark, bu fonksiyon RSI/watchlist/
+    gate entegrasyonu için gerekli ek alanları (leg_id, duration_bars,
+    rsi_oversold/overbought) da hesaplayıp döndürüyor.
+
+    RSI aşırı satim/alim SARTI BURADA UYGULANMAZ - current_rsi ve
+    rsi_oversold/rsi_overbought bilgisi sonuca eklenir; GATE kararını
+    veren üst katman (evaluate_confluence_entry) bunu kullanır.
+
+    Donus: (None, reason_kodu) VEYA (best-match dict, None).
     ══════════════════════════════════════════════════════════════
     """
     close = df["close"]
@@ -752,7 +742,7 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
         for p in pivots:
             log_status(f"   [Pivot] {p['time']} {p['type']:<6} {p['price']:.6f}")
 
-    swings = []
+    legs = []
     for k in range(len(pivots) - 1):
         p_a, p_b = pivots[k], pivots[k + 1]
         a_time, a_price, a_type = p_a["time"], p_a["price"], p_a["type"]
@@ -761,125 +751,101 @@ def find_confluence_candidates(df, watch_tolerance=0.08, verbose=False):
         if abs(b_price - a_price) <= 0:
             continue
 
-        levels = compute_fib_levels(a_price, b_price, a_type, FIB_CONFLUENCE_LEVELS)
-        if any(lv <= 0 for lv in levels.values()):
+        retracement_levels = compute_fib_levels(a_price, b_price, a_type, RETRACEMENT_RATIOS)
+        extension_levels = compute_fib_levels(a_price, b_price, a_type, EXTENSION_RATIOS)
+        if any(lv <= 0 for lv in retracement_levels.values()) or any(lv <= 0 for lv in extension_levels.values()):
             continue
 
         duration_bars = df.index.get_loc(b_time) - df.index.get_loc(a_time)
 
-        swings.append({
+        legs.append({
             "leg_id": k,
             "duration_bars": int(duration_bars),
             "a_type": a_type, "a_price": a_price, "a_time": a_time,
             "b_type": b_type, "b_price": b_price, "b_time": b_time,
-            "levels": levels,
+            "magnitude": abs(b_price - a_price),
+            "retracement_levels": retracement_levels,
+            "extension_levels": extension_levels,
         })
 
         if verbose:
-            level_str = ", ".join(f"{r}={v:.6f}" for r, v in levels.items())
-            log_status(f"   [Confluence] bacak={k} A({a_type})={a_price:.6f} B({b_type})={b_price:.6f} ({duration_bars} bar) → {level_str}")
+            log_status(f"   [Confluence] bacak={k} A({a_type})={a_price:.6f} B({b_type})={b_price:.6f} ({duration_bars} bar)")
 
-    if len(swings) < 2:
+    if len(legs) < 2:
         if verbose:
             log_status("   [Confluence] atlandı → en az 2 pivot bacağı bulunamadı (fiyat hareketi yetersiz)")
         return None, "yetersiz_pivot"
 
-    independent_pair_exists = False
+    big_wave = max(legs, key=lambda l: l["magnitude"])
+
+    candidate_legs = [
+        l for l in legs
+        if l["leg_id"] != big_wave["leg_id"]
+        and l["a_time"] > big_wave["b_time"]
+        and l["a_time"] not in (big_wave["a_time"], big_wave["b_time"])
+        and l["b_time"] not in (big_wave["a_time"], big_wave["b_time"])
+    ]
+    if not candidate_legs:
+        if verbose:
+            log_status("   [Confluence] atlandı → büyük dalgadan sonra bağımsız bir küçük ABC bacağı yok")
+        return None, "kucuk_abc_bacagi_yok"
+
+    small_leg = max(candidate_legs, key=lambda l: l["leg_id"])
+
     best_match = None
-    for i in range(len(swings)):
-        for j in range(i + 1, len(swings)):
-            swing_i, swing_j = swings[i], swings[j]
-
-            # Gercek bagimsizlik: HEM A HEM B noktalari farkli olmali.
-            # Sadece biri (ozellikle guncel/son ekstremum olan B) ortaksa
-            # bu iki swing gercekte bagimsiz degil - ayni referans noktasina
-            # dayanan farkli boy olcumleri, gercek "iki ayri swing" degil.
-            shares_a_point = (
-                swing_i["a_time"] == swing_j["a_time"] or swing_i["a_time"] == swing_j["b_time"]
-                or swing_i["b_time"] == swing_j["a_time"] or swing_i["b_time"] == swing_j["b_time"]
-            )
-            if shares_a_point:
-                if verbose:
-                    log_status(
-                        f"   [Confluence] bacak{swing_i['leg_id']} × bacak{swing_j['leg_id']} atlandı "
-                        f"→ ortak nokta paylaşıyorlar (gerçekten bağımsız değil)"
-                    )
+    for ratio_big, level_big in big_wave["retracement_levels"].items():
+        dist_big = abs(current_price - level_big) / level_big
+        if dist_big > watch_tolerance * 2:
+            continue
+        for ratio_small, level_small in small_leg["extension_levels"].items():
+            dist_small = abs(current_price - level_small) / level_small
+            if dist_small > watch_tolerance * 2:
                 continue
-
-            independent_pair_exists = True
-
-            for ratio_i, level_i in swing_i["levels"].items():
-                dist_i = abs(current_price - level_i) / level_i
-                # cok uzak (watch_tolerance'in cok disinda) kombinasyonlari
-                # erken elemek performans icin - ama tam esitsizlik degil,
-                # gevsek bir on-filtre (watch_tolerance zaten gate toleransindan genis)
-                if dist_i > watch_tolerance * 2:
-                    continue
-                for ratio_j, level_j in swing_j["levels"].items():
-                    # SADECE CAPRAZ eslesme: biri retracement biri extension
-                    # olmali. Iki retracement veya iki extension'in kendi
-                    # aralarinda cakismasi confluence sayilmaz.
-                    i_is_retracement = ratio_i in RETRACEMENT_RATIOS
-                    j_is_retracement = ratio_j in RETRACEMENT_RATIOS
-                    if i_is_retracement == j_is_retracement:
-                        continue
-
-                    dist_j = abs(current_price - level_j) / level_j
-                    if dist_j > watch_tolerance * 2:
-                        continue
-
-                    combined_dist = dist_i + dist_j
-                    if best_match is None or combined_dist < best_match["combined_dist"]:
-                        best_match = {
-                            "combined_dist": combined_dist,
-                            "swing_i": swing_i, "ratio_i": ratio_i, "level_i": level_i, "dist_i": dist_i,
-                            "swing_j": swing_j, "ratio_j": ratio_j, "level_j": level_j, "dist_j": dist_j,
-                        }
+            combined_dist = dist_big + dist_small
+            if best_match is None or combined_dist < best_match["combined_dist"]:
+                best_match = {
+                    "combined_dist": combined_dist,
+                    "ratio_big": ratio_big, "level_big": level_big, "dist_big": dist_big,
+                    "ratio_small": ratio_small, "level_small": level_small, "dist_small": dist_small,
+                }
 
     if best_match is None:
-        if not independent_pair_exists:
-            reason = "tumu_ortak_nokta_paylasiyor"
-            if verbose:
-                log_status("   [Confluence] atlandı → bulunan tüm swing çiftleri ortak nokta paylaşıyor (gerçekten bağımsız değil)")
-        else:
-            reason = "cok_uzak_veya_capraz_tip_yok"
-            if verbose:
-                log_status("   [Confluence] atlandı → bağımsız çiftler var ama hiçbiri makul mesafede çapraz eşleşme vermiyor")
-        return None, reason
+        if verbose:
+            log_status("   [Confluence] atlandı → büyük dalga retracement'i ile küçük bacak extension'ı makul mesafede değil")
+        return None, "cok_uzak"
 
-    swing_i, swing_j = best_match["swing_i"], best_match["swing_j"]
     within_tolerance = (
-        best_match["dist_i"] <= FIB_CONFLUENCE_TOLERANCE
-        and best_match["dist_j"] <= FIB_CONFLUENCE_TOLERANCE
+        best_match["dist_big"] <= FIB_CONFLUENCE_TOLERANCE
+        and best_match["dist_small"] <= FIB_CONFLUENCE_TOLERANCE
     )
 
     return {
-        "current_price"        : round(float(current_price), 6),
-        "current_rsi"          : round(float(current_rsi), 2),
+        "current_price"         : round(float(current_price), 6),
+        "current_rsi"           : round(float(current_rsi), 2),
         "rsi_oversold"          : bool(current_rsi < RSI_OVERSOLD_THRESHOLD),
         "rsi_overbought"        : bool(current_rsi > RSI_OVERBOUGHT_THRESHOLD),
-        "swing_1_leg_id"         : swing_i["leg_id"],
-        "swing_1_duration_bars"  : swing_i["duration_bars"],
-        "swing_1_a_type"        : swing_i["a_type"],
-        "swing_1_a_price"       : round(float(swing_i["a_price"]), 6),
-        "swing_1_a_time"        : swing_i["a_time"].isoformat(),
-        "swing_1_b_type"        : swing_i["b_type"],
-        "swing_1_b_price"       : round(float(swing_i["b_price"]), 6),
-        "swing_1_b_time"        : swing_i["b_time"].isoformat(),
-        "swing_1_fib_ratio"     : best_match["ratio_i"],
-        "swing_1_fib_price"     : round(float(best_match["level_i"]), 6),
-        "swing_1_dist_pct"      : round(float(best_match["dist_i"]) * 100, 3),
-        "swing_2_leg_id"         : swing_j["leg_id"],
-        "swing_2_duration_bars"  : swing_j["duration_bars"],
-        "swing_2_a_type"        : swing_j["a_type"],
-        "swing_2_a_price"       : round(float(swing_j["a_price"]), 6),
-        "swing_2_a_time"        : swing_j["a_time"].isoformat(),
-        "swing_2_b_type"        : swing_j["b_type"],
-        "swing_2_b_price"       : round(float(swing_j["b_price"]), 6),
-        "swing_2_b_time"        : swing_j["b_time"].isoformat(),
-        "swing_2_fib_ratio"     : best_match["ratio_j"],
-        "swing_2_fib_price"     : round(float(best_match["level_j"]), 6),
-        "swing_2_dist_pct"      : round(float(best_match["dist_j"]) * 100, 3),
+        "swing_1_leg_id"        : big_wave["leg_id"],
+        "swing_1_duration_bars" : big_wave["duration_bars"],
+        "swing_1_a_type"        : big_wave["a_type"],
+        "swing_1_a_price"       : round(float(big_wave["a_price"]), 6),
+        "swing_1_a_time"        : big_wave["a_time"].isoformat(),
+        "swing_1_b_type"        : big_wave["b_type"],
+        "swing_1_b_price"       : round(float(big_wave["b_price"]), 6),
+        "swing_1_b_time"        : big_wave["b_time"].isoformat(),
+        "swing_1_fib_ratio"     : best_match["ratio_big"],
+        "swing_1_fib_price"     : round(float(best_match["level_big"]), 6),
+        "swing_1_dist_pct"      : round(float(best_match["dist_big"]) * 100, 3),
+        "swing_2_leg_id"        : small_leg["leg_id"],
+        "swing_2_duration_bars" : small_leg["duration_bars"],
+        "swing_2_a_type"        : small_leg["a_type"],
+        "swing_2_a_price"       : round(float(small_leg["a_price"]), 6),
+        "swing_2_a_time"        : small_leg["a_time"].isoformat(),
+        "swing_2_b_type"        : small_leg["b_type"],
+        "swing_2_b_price"       : round(float(small_leg["b_price"]), 6),
+        "swing_2_b_time"        : small_leg["b_time"].isoformat(),
+        "swing_2_fib_ratio"     : best_match["ratio_small"],
+        "swing_2_fib_price"     : round(float(best_match["level_small"]), 6),
+        "swing_2_dist_pct"      : round(float(best_match["dist_small"]) * 100, 3),
         "combined_dist_pct"     : round(float(best_match["combined_dist"]) * 100, 3),
         "within_tolerance"      : bool(within_tolerance),
         "candle_total"          : len(df),
@@ -1156,8 +1122,8 @@ def run_scanner():
             if candidate is None:
                 reason_map = {
                     "yetersiz_pivot": "En az 2 pivot bacağı bulunamadı (fiyat hareketi yetersiz)",
-                    "tumu_ortak_nokta_paylasiyor": "Bulunan swing çiftlerinin TÜMÜ ortak nokta paylaşıyor (gerçekten bağımsız değil)",
-                    "cok_uzak_veya_capraz_tip_yok": "Bağımsız çiftler var ama hiçbiri makul mesafede çapraz (retracement×extension) eşleşme vermiyor",
+                    "kucuk_abc_bacagi_yok": "Büyük dalgadan sonra bağımsız bir küçük ABC bacağı yok",
+                    "cok_uzak": "Büyük dalga retracement'i ile küçük bacak extension'ı makul mesafede değil",
                     "rsi_hesaplanamiyor": "RSI henüz hesaplanamıyor (ısınma dönemi)",
                 }
                 reason_text = reason_map.get(no_candidate_reason, no_candidate_reason)
