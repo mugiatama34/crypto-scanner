@@ -369,6 +369,12 @@ WATCHLIST_MAX_COMBINED_DIST_PCT = float(os.environ.get("WATCHLIST_MAX_COMBINED_D
 # cok kucuk (%1-2) gurultuyu pivot sanar, cok buyuk (%15+) neredeyse hic
 # pivot bulamaz.
 ZIGZAG_PCT_THRESHOLD = float(os.environ.get("ZIGZAG_PCT_THRESHOLD", 0.05))
+# 2026-07-13: cok kisa sureli (%esigi gecen ama sadece birkac mumde olan)
+# sicramalarin "gecerli dalga" sayilmasini onlemek icin minimum bacak
+# suresi. 8 bar = 32 saat (4H mumda) - bunun altindaki hareketler gurultu
+# sayilip pivot listesine hic girmiyor (find_zigzag_pivots icinde "swallow"
+# edilip bir sonraki gercek pivotla birlestiriliyor).
+MIN_LEG_DURATION_BARS = int(os.environ.get("MIN_LEG_DURATION_BARS", 8))
 
 # ── DİĞER ────────────────────────────────────────────────────────────
 PAUSE_SEC        = 0.22
@@ -472,7 +478,7 @@ def compute_fib_levels(a_price, b_price, a_type, ratios):
     return levels
 
 
-def find_zigzag_pivots(df, pct_threshold=ZIGZAG_PCT_THRESHOLD):
+def find_zigzag_pivots(df, pct_threshold=ZIGZAG_PCT_THRESHOLD, min_leg_bars=MIN_LEG_DURATION_BARS):
     """
     Fiyat serisinden GERÇEK yerel dönüş noktalarını (pivot high/low) bulur.
     Klasik "ZigZag" mantığı: mevcut yönde yeni bir ekstrem oluştukça takip
@@ -480,6 +486,12 @@ def find_zigzag_pivots(df, pct_threshold=ZIGZAG_PCT_THRESHOLD):
     bir pivot onaylanır ve yön değişir. Bu, takvim pencereleri (90/60/30
     gün) yerine fiyatın kendi yapısından gelen, doğası gereği birbirinden
     AYRIŞAN (farklı A/B noktalarına sahip) swing adayları üretir.
+
+    2026-07-13: Ham zigzag TAMAMLANDIKTAN SONRA, `_merge_short_legs` ile
+    ardışık pivotlar arasındaki süresi `min_leg_bars`'ın altında kalan
+    "bacaklar" (örn. güçlü bir trend içindeki birkaç saatlik ani bir
+    whipsaw) ÇİFT HALİNDE elenir - bu, dip/zirve alternansını HER ZAMAN
+    korur (tek pivot silmek yerine çift silindiği için sıra bozulmaz).
 
     Dönüş: kronolojik sırayla pivot noktaları listesi:
       [{"time": Timestamp, "price": float, "type": "dip"|"zirve"}, ...]
@@ -538,7 +550,39 @@ def find_zigzag_pivots(df, pct_threshold=ZIGZAG_PCT_THRESHOLD):
         first_type = "dip" if pivots[0]["type"] == "zirve" else "zirve"
         pivots.insert(0, {"time": times[0], "price": float(df["close"].iloc[0]), "type": first_type})
 
+    pivots = _merge_short_legs(df, pivots, min_leg_bars)
     return pivots
+
+
+def _merge_short_legs(df, pivots, min_leg_bars):
+    """Ardisik pivot ciftleri arasindaki bar mesafesi min_leg_bars'in
+    altindaysa, o cifti (HER ZAMAN IKISINI BIRDEN) listeden cikarir.
+    Alternans (dip/zirve/dip/zirve...) boylece daima korunur - tek pivot
+    silmek alternansi bozardi, cift silmek bozmaz. Kalan komsu pivotlar
+    yeniden birbirine cok yakin hale gelebileceginden, degisiklik
+    kalmayana kadar tekrar taranir."""
+    if min_leg_bars <= 0 or len(pivots) < 3:
+        return pivots
+
+    pivots = list(pivots)
+    time_to_idx = {t: i for i, t in enumerate(df.index)}
+
+    changed = True
+    while changed and len(pivots) >= 3:
+        changed = False
+        for i in range(len(pivots) - 1):
+            idx1 = time_to_idx.get(pivots[i]["time"])
+            idx2 = time_to_idx.get(pivots[i + 1]["time"])
+            if idx1 is None or idx2 is None:
+                continue
+            if (idx2 - idx1) < min_leg_bars:
+                del pivots[i:i + 2]
+                changed = True
+                break
+
+    return pivots
+
+
 
 
 def find_big_wave_abc_pattern(df, max_report_dist_pct=20.0):
