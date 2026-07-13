@@ -228,10 +228,28 @@ def send_telegram_message(text):
         return False
 
 
+def _fmt_time_short(iso_str):
+    """ISO zaman damgasini 'DD/MM SS:DD' gibi kisa, okunakli bir bicime cevirir
+    (TradingView'de mumu bulmak icin)."""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%d/%m %H:%M")
+    except Exception:
+        return iso_str
+
+
 def format_signal_telegram_message(signal):
-    """Confluence sinyalini Telegram icin okunakli HTML mesajina cevirir."""
+    """Confluence sinyalini Telegram icin okunakli HTML mesajina cevirir.
+    A/B noktalarinin fiyat+zamanini da icerir - boylece TradingView'de
+    elle Fibonacci cizip dogrulama yapilabilir (sadece 'bacakX' numarasi
+    grafikte hicbir seye karsilik gelmez, iste bu yuzden eklendi)."""
     direction_label = "🟢 LONG" if signal["direction"] == "long" else "🔴 SHORT"
     confidence_emoji = {"low": "🟡", "medium": "🟠", "high": "🟢"}.get(signal["confidence"], "⚪")
+
+    s1_a_t = _fmt_time_short(signal["swing_1_a_time"])
+    s1_b_t = _fmt_time_short(signal["swing_1_b_time"])
+    s2_a_t = _fmt_time_short(signal["swing_2_a_time"])
+    s2_b_t = _fmt_time_short(signal["swing_2_b_time"])
 
     return (
         f"{direction_label} — <b>{signal['symbol']}</b>\n"
@@ -241,10 +259,14 @@ def format_signal_telegram_message(signal):
         f"Stop: <code>{signal['stop_price']}</code>\n"
         f"Pozisyon: <code>{signal['position_size']}</code>\n"
         f"\n"
-        f"Swing1: bacak{signal['swing_1_leg_id']} {signal['swing_1_fib_ratio']} → {signal['swing_1_fib_price']} (Δ%{signal['swing_1_dist_pct']})\n"
-        f"Swing2: bacak{signal['swing_2_leg_id']} {signal['swing_2_fib_ratio']} → {signal['swing_2_fib_price']} (Δ%{signal['swing_2_dist_pct']})\n"
-        f"RSI: {signal['current_rsi']}\n"
+        f"<b>Swing1</b> ({signal['swing_1_fib_ratio']} → {signal['swing_1_fib_price']}, Δ%{signal['swing_1_dist_pct']}):\n"
+        f"  A ({signal['swing_1_a_type']}): {signal['swing_1_a_price']} @ {s1_a_t}\n"
+        f"  B ({signal['swing_1_b_type']}): {signal['swing_1_b_price']} @ {s1_b_t}\n"
+        f"<b>Swing2</b> ({signal['swing_2_fib_ratio']} → {signal['swing_2_fib_price']}, Δ%{signal['swing_2_dist_pct']}):\n"
+        f"  A ({signal['swing_2_a_type']}): {signal['swing_2_a_price']} @ {s2_a_t}\n"
+        f"  B ({signal['swing_2_b_type']}): {signal['swing_2_b_price']} @ {s2_b_t}\n"
         f"\n"
+        f"RSI: {signal['current_rsi']}\n"
         f"Yapı var mı: {signal['structure_present']} | Tam teyitli: {signal['fully_confirmed']}"
     )
 
@@ -895,11 +917,23 @@ def evaluate_confluence_entry(df, candidate, equity=1000, risk_pct=0.015):
         "swing_1_fib_ratio": candidate["swing_1_fib_ratio"],
         "swing_1_fib_price": candidate["swing_1_fib_price"],
         "swing_1_dist_pct": candidate["swing_1_dist_pct"],
+        "swing_1_a_type": candidate["swing_1_a_type"],
+        "swing_1_a_price": candidate["swing_1_a_price"],
+        "swing_1_a_time": candidate["swing_1_a_time"],
+        "swing_1_b_type": candidate["swing_1_b_type"],
+        "swing_1_b_price": candidate["swing_1_b_price"],
+        "swing_1_b_time": candidate["swing_1_b_time"],
         "swing_2_leg_id": candidate["swing_2_leg_id"],
         "swing_2_duration_bars": candidate["swing_2_duration_bars"],
         "swing_2_fib_ratio": candidate["swing_2_fib_ratio"],
         "swing_2_fib_price": candidate["swing_2_fib_price"],
         "swing_2_dist_pct": candidate["swing_2_dist_pct"],
+        "swing_2_a_type": candidate["swing_2_a_type"],
+        "swing_2_a_price": candidate["swing_2_a_price"],
+        "swing_2_a_time": candidate["swing_2_a_time"],
+        "swing_2_b_type": candidate["swing_2_b_type"],
+        "swing_2_b_price": candidate["swing_2_b_price"],
+        "swing_2_b_time": candidate["swing_2_b_time"],
         "current_rsi": candidate["current_rsi"],
     }
 
