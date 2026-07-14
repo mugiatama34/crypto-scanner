@@ -57,5 +57,6 @@ jobs:
             okx_double_bottom_signals.csv
             okx_watchlist.csv
             okx_big_wave_abc.csv
+            okx_double_bottom_spec.csv
           if-no-files-found: ignore
           retention-days: 30
