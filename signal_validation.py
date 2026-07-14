@@ -384,6 +384,20 @@ def check_wyckoff_volume(df: pd.DataFrame, low1_idx: int, low2_idx: int,
     }
 
 
+def check_wyckoff_volume_short(df: pd.DataFrame, high1_idx: int, high2_idx: int,
+                                max_ratio: float = 1.1) -> dict:
+    """check_wyckoff_volume'un short/Upthrust aynasi: ikinci tepede hacim
+    ilkine gore dusukse, talebin tukendigini (upthrust) isaret eder."""
+    vol1 = df["volume"].iloc[high1_idx]
+    vol2 = df["volume"].iloc[high2_idx]
+    passed = vol2 <= vol1 * max_ratio
+    return {
+        "passed": passed,
+        "vol1": vol1, "vol2": vol2,
+        "reason": None if passed else "Ikinci tepede hacim beklenenden yuksek (talep tukenmesi/upthrust teyit edilemedi)",
+    }
+
+
 # ---------------------------------------------------------------------------
 # 5) Elliott pozisyon filtresi (sanity check, tetikleyici degil)
 # ---------------------------------------------------------------------------
