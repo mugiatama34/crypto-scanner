@@ -61,6 +61,8 @@ from tqdm import tqdm
 from signal_validation import (
     evaluate_signal, evaluate_signal_short,
     check_double_bottom, check_double_top, compute_stop_and_size,
+    check_rsi_divergence, check_rsi_negative_divergence, check_fibonacci_zone,
+    check_wyckoff_volume, check_wyckoff_volume_short,
 )
 
 warnings.filterwarnings("ignore")
@@ -95,21 +97,27 @@ TELEGRAM_COOLDOWN_HOURS = float(os.environ.get("TELEGRAM_COOLDOWN_HOURS", 4))
 
 
 def _load_state_file():
-    """STATE_FILE'i butun olarak yukler: {'watchlist': {...}, 'telegram_notified': {...}}.
-    Dosya yoksa/bozuksa/eski formattaysa (duz watchlist dict'i) bos/uyumlu
-    bir yapiya geri doner - sistem kendi kendini onarir, hata firlatmaz."""
+    """STATE_FILE'i butun olarak yukler: {'watchlist': {...}, 'telegram_notified': {...},
+    'spec_notified': {...}}. Dosya yoksa/bozuksa/eski formattaysa (duz
+    watchlist dict'i) bos/uyumlu bir yapiya geri doner - sistem kendi
+    kendini onarir, hata firlatmaz."""
+    empty = {"watchlist": {}, "telegram_notified": {}, "spec_notified": {}}
     if not os.path.exists(STATE_FILE):
-        return {"watchlist": {}, "telegram_notified": {}}
+        return empty
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        if "watchlist" in raw or "telegram_notified" in raw:
-            return {"watchlist": raw.get("watchlist", {}), "telegram_notified": raw.get("telegram_notified", {})}
+        if any(k in raw for k in empty):
+            return {
+                "watchlist": raw.get("watchlist", {}),
+                "telegram_notified": raw.get("telegram_notified", {}),
+                "spec_notified": raw.get("spec_notified", {}),
+            }
         # Eski format (2026-07-10 oncesi): dosyanin tamami duz watchlist dict'iydi.
-        return {"watchlist": raw, "telegram_notified": {}}
+        return {"watchlist": raw, "telegram_notified": {}, "spec_notified": {}}
     except Exception as exc:
         log_status(f"⚠️  Onceki state okunamadi, sifirdan baslaniyor ({exc})")
-        return {"watchlist": {}, "telegram_notified": {}}
+        return empty
 
 
 def load_previous_watchlist_state():
@@ -122,6 +130,23 @@ def load_previous_telegram_state():
     """Onceki tarama turunda hangi coin/yon icin ne zaman Telegram bildirimi
     gonderildigini yukler (cooldown kontrolu icin)."""
     return _load_state_file()["telegram_notified"]
+
+
+def load_previous_spec_notified_state():
+    """Spec raporu (2026-07-14) icin: hangi coin+B_zamani kombinasyonu
+    daha once VALID sinyal olarak bildirildi. Sembol+B_zamani ayni
+    kaldigi surece TEKRAR bildirim gonderilmez (spec madde 10)."""
+    return _load_state_file()["spec_notified"]
+
+
+def should_notify_spec(symbol, b_time_iso, previous_spec_state):
+    """Ayni sembol + ayni B_zamani kombinasyonu daha once bildirildiyse
+    tekrar gondermez. B_zamani DEGISTIYSE (yeni bir Double Bottom/Top
+    olustu demektir) bu YENI bilgi sayilir, hemen bildirir."""
+    prev = previous_spec_state.get(symbol)
+    if prev is None:
+        return True
+    return prev.get("b_time") != b_time_iso
 
 
 def should_notify_telegram(symbol, direction, previous_telegram_state, cooldown_hours=TELEGRAM_COOLDOWN_HOURS):
@@ -141,9 +166,9 @@ def should_notify_telegram(symbol, direction, previous_telegram_state, cooldown_
     return elapsed_hours >= cooldown_hours
 
 
-def save_watchlist_state(watchlist_results, telegram_notified_state=None):
-    """Bu turun watchlist sonuclarini VE telegram bildirim gecmisini bir
-    sonraki tur icin kaydeder (GitHub Actions cache adimi bunu tasir).
+def save_watchlist_state(watchlist_results, telegram_notified_state=None, spec_notified_state=None):
+    """Bu turun watchlist sonuclarini VE telegram/spec bildirim gecmisini
+    bir sonraki tur icin kaydeder (GitHub Actions cache adimi bunu tasir).
     reference_id, hangi 2 swing'in karsilastirildigini parmak izi olarak
     tutar - boylece bir sonraki tur, ayni swing ciftiyle mi kiyaslandigini
     yoksa referansin degisip degismedigini ayirt edebilir."""
@@ -158,6 +183,7 @@ def save_watchlist_state(watchlist_results, telegram_notified_state=None):
     full_state = {
         "watchlist": watchlist_state,
         "telegram_notified": telegram_notified_state or {},
+        "spec_notified": spec_notified_state or {},
     }
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(full_state, f, indent=2, ensure_ascii=False)
@@ -383,6 +409,21 @@ MIN_CANDLES      = 40      # En kısa pencere (30g) + RSI ısınma dönemi için
 
 # ── LİKİDİTE / STABLECOIN FİLTRELERİ ─────────────────────────────────
 MIN_24H_VOLUME_USDT = float(os.environ.get("MIN_24H_VOLUME_USDT", 1_000_000))
+
+# ── DOUBLE BOTTOM/TOP SPEC RAPORU (2026-07-14, TAMAMEN AYRI 3. rapor) ──
+# Kullanicinin Proje'den aldigi detayli spec'e gore: Double Bottom/Top
+# ana gate, RSI diverjansi + Fibonacci bandi sarti, Wyckoff/confluence/
+# zaman simetrisi/BTC uyumu confidence katmanlari, Elliott carpani,
+# DUSUK/ORTA/YUKSEK siniflandirma. Ana confluence gate'ini (find_
+# confluence_candidates) HICBIR SEKILDE etkilemez - ayri CSV + ayri
+# Telegram bildirimi (okx_double_bottom_spec.csv).
+# NOT: Kullanici Fib toleransini spec'in ±%0.5'i yerine mevcut ±%3'te
+# tutmayi tercih etti (2026-07-14 karari).
+SPEC_MIN_BAR_GAP        = 10
+SPEC_LEVEL_TOLERANCE    = 0.03
+SPEC_FIB_ZONE_TOLERANCE = FIB_CONFLUENCE_TOLERANCE  # ±%3, kullanicinin tercihi
+SPEC_CONFLUENCE_TOLERANCE = 0.025  # confidence katmani icin ±%2.5 (spec: %2-3 araligi)
+SPEC_TIME_SYMMETRY_BAR_TOLERANCE = 2
 
 STABLECOIN_BASES = {
     "USDC", "USDG", "USAT", "DAI", "TUSD", "FDUSD", "USDD", "USDP", "PYUSD",
@@ -949,6 +990,295 @@ def evaluate_confluence_entry(df, candidate, equity=1000, risk_pct=0.015):
 
 
 
+def check_shortening_of_thrust(pivots, end_leg_id, direction):
+    """Wyckoff 'shortening of thrust': son 3 bacağın genliğinin (|B-A|)
+    küçülüp küçülmediğini kontrol eder - bir trendin ivme kaybettiğinin
+    işareti. direction='long' ise dip bacaklarına, 'short' ise tepe
+    bacaklarına bakar (basitleştirilmiş: her iki yönde de son 3 bacağın
+    genel genlik trendine bakılır, spesifik dip/tepe ayrımı yapılmaz -
+    zigzag bacakları zaten alternatif dip/tepe içerir)."""
+    if end_leg_id < 2:
+        return {"passed": False, "reason": "Yeterli bacak geçmişi yok (en az 3 bacak gerekli)"}
+    legs_by_id = {p: None for p in range(end_leg_id + 1)}
+    # pivots listesinden bacak genliklerini yeniden hesapla
+    magnitudes = []
+    for k in range(max(0, end_leg_id - 2), end_leg_id + 1):
+        if k + 1 >= len(pivots):
+            continue
+        mag = abs(pivots[k + 1]["price"] - pivots[k]["price"])
+        magnitudes.append(mag)
+    if len(magnitudes) < 3:
+        return {"passed": False, "reason": "Yeterli bacak geçmişi yok (en az 3 bacak gerekli)"}
+    shortening = magnitudes[0] > magnitudes[1] > magnitudes[2]
+    return {
+        "passed": shortening,
+        "magnitudes": magnitudes,
+        "reason": None if shortening else "Ardışık bacak genlikleri küçülmüyor",
+    }
+
+
+def check_confluence_match(pivots, primary_leg_id, primary_level, tolerance=SPEC_CONFLUENCE_TOLERANCE):
+    """İkinci BAĞIMSIZ bir bacağın herhangi bir fib seviyesi, ana swing'in
+    eşleşen seviyesine ±tolerance içinde mi? (confidence katmanı - gate
+    değil). find_confluence_candidates'tan BAĞIMSIZ, basitleştirilmiş bir
+    kontrol: sadece 'başka bir bağımsız bacak var mı ve seviyesi yakın mı'
+    sorusuna bakar, rol (retracement/extension) ayrımı yapmaz."""
+    for k in range(len(pivots) - 1):
+        if k == primary_leg_id:
+            continue
+        p_a, p_b = pivots[k], pivots[k + 1]
+        if p_a["time"] == pivots[primary_leg_id]["time"] or p_a["time"] == pivots[primary_leg_id + 1]["time"]:
+            continue
+        if p_b["time"] == pivots[primary_leg_id]["time"] or p_b["time"] == pivots[primary_leg_id + 1]["time"]:
+            continue
+        if abs(p_b["price"] - p_a["price"]) <= 0:
+            continue
+        levels = compute_fib_levels(p_a["price"], p_b["price"], p_a["type"], FIB_CONFLUENCE_LEVELS)
+        for ratio, level in levels.items():
+            if level <= 0:
+                continue
+            if abs(primary_level - level) / level <= tolerance:
+                return {"passed": True, "matched_leg_id": k, "matched_ratio": ratio, "matched_level": level}
+    return {"passed": False, "reason": "Bağımsız ikinci bir swing'in fib seviyesi yakın mesafede değil"}
+
+
+def check_time_symmetry(df, a_time, b_time, ratios=(0.618, 1.0, 1.272), bar_tolerance=SPEC_TIME_SYMMETRY_BAR_TOLERANCE):
+    """Güncel barın, swing süresinin (B-A) 0.618/1.0/1.272 katı kadar
+    B'den sonra oluşan bir 'zaman izdüşümü' noktasına ±bar_tolerance
+    içinde olup olmadığını kontrol eder (Gann/zaman-fiyat simetrisi,
+    confidence katmanı - gate değil)."""
+    try:
+        a_idx = df.index.get_loc(a_time)
+        b_idx = df.index.get_loc(b_time)
+    except KeyError:
+        return {"passed": False, "reason": "Zaman indeksleri bulunamadı"}
+    swing_duration = b_idx - a_idx
+    if swing_duration <= 0:
+        return {"passed": False, "reason": "Geçersiz swing süresi"}
+    current_idx = len(df) - 1
+    for ratio in ratios:
+        projected_idx = b_idx + round(swing_duration * ratio)
+        if abs(current_idx - projected_idx) <= bar_tolerance:
+            return {"passed": True, "matched_ratio": ratio, "projected_idx": projected_idx}
+    return {"passed": False, "reason": "Güncel bar hiçbir zaman izdüşümü noktasına yakın değil"}
+
+
+def get_btc_trend(btc_df, sma_period=20):
+    """BTC/USDT 4H df'inden basit bir trend yönü çıkarır: son kapanış,
+    SMA(sma_period)'in üzerindeyse 'up', altındaysa 'down', çok yakınsa
+    (±%0.5) 'neutral'. BTC verisi alınamazsa None döner (opsiyonel katman
+    - alınamazsa sessizce atlanır, hata fırlatmaz)."""
+    if btc_df is None or len(btc_df) < sma_period:
+        return None
+    sma = btc_df["close"].iloc[-sma_period:].mean()
+    current = btc_df["close"].iloc[-1]
+    diff_pct = (current - sma) / sma
+    if diff_pct > 0.005:
+        return "up"
+    elif diff_pct < -0.005:
+        return "down"
+    return "neutral"
+
+
+def _evaluate_spec_direction(df, direction, pivots, btc_trend=None, equity=1000, risk_pct=0.015):
+    """Tek bir yön (long veya short) için spec'teki tam gate + confidence
+    + risk zincirini çalıştırır. evaluate_double_bottom_spec_signal
+    tarafından her iki yön için de çağrılır."""
+    failed_conditions = []
+    passed_conditions = []
+
+    if direction == "long":
+        structure_check = check_double_bottom(df, min_bar_gap=SPEC_MIN_BAR_GAP, level_tolerance=SPEC_LEVEL_TOLERANCE)
+        structure_key = "double_bottom"
+    else:
+        structure_check = check_double_top(df, min_bar_gap=SPEC_MIN_BAR_GAP, level_tolerance=SPEC_LEVEL_TOLERANCE)
+        structure_key = "double_top"
+
+    if not structure_check["passed"]:
+        failed_conditions.append(f"{structure_key}: {structure_check['reason']}")
+        return {"gate_passed": False, "failed_conditions": failed_conditions, "passed_conditions": passed_conditions}
+    passed_conditions.append(f"{structure_key}: teyitli")
+
+    if direction == "long":
+        idx1, idx2 = structure_check["low1_idx"], structure_check["low2_idx"]
+        rsi_check = check_rsi_divergence(df, idx1, idx2)
+    else:
+        idx1, idx2 = structure_check["high1_idx"], structure_check["high2_idx"]
+        rsi_check = check_rsi_negative_divergence(df, idx1, idx2)
+
+    if not rsi_check["passed"]:
+        failed_conditions.append(f"rsi_divergence: {rsi_check['reason']}")
+        return {"gate_passed": False, "failed_conditions": failed_conditions, "passed_conditions": passed_conditions}
+    passed_conditions.append("rsi_divergence: teyitli")
+
+    swing_high = df["high"].iloc[-60:].max()
+    swing_low = df["low"].iloc[-60:].min()
+    fib_check = check_fibonacci_zone(df, swing_high, swing_low, tolerance=SPEC_FIB_ZONE_TOLERANCE)
+    if not fib_check["passed"]:
+        failed_conditions.append(f"fib_zone: {fib_check['reason']}")
+        return {"gate_passed": False, "failed_conditions": failed_conditions, "passed_conditions": passed_conditions}
+    passed_conditions.append("fib_zone: teyitli")
+
+    # ── GATE GEÇİLDİ - Confidence katmanları ────────────────────────
+    layers = {}
+
+    if direction == "long":
+        wyckoff_check = check_wyckoff_volume(df, idx1, idx2)
+    else:
+        wyckoff_check = check_wyckoff_volume_short(df, idx1, idx2)
+    thrust_check = None
+    # Wyckoff spring/upthrust VEYA shortening of thrust - hangisi bacak
+    # bilgisiyle eslesiyorsa onu kullan (spec: "VEYA")
+    wyckoff_or_thrust = wyckoff_check["passed"]
+    if not wyckoff_or_thrust and pivots:
+        nearest_leg_id = max((k for k in range(len(pivots) - 1) if pivots[k + 1]["time"] <= df.index[idx2]), default=None)
+        if nearest_leg_id is not None:
+            thrust_check = check_shortening_of_thrust(pivots, nearest_leg_id, direction)
+            wyckoff_or_thrust = thrust_check["passed"]
+    layers["wyckoff_spring_or_thrust"] = bool(wyckoff_or_thrust)
+
+    confluence_check = {"passed": False}
+    if pivots:
+        nearest_leg_id = max((k for k in range(len(pivots) - 1) if pivots[k + 1]["time"] <= df.index[idx2]), default=None)
+        if nearest_leg_id is not None:
+            primary_level = fib_check.get("fib618") or swing_high
+            confluence_check = check_confluence_match(pivots, nearest_leg_id, primary_level)
+    layers["confluence"] = bool(confluence_check["passed"])
+
+    time_symmetry_check = check_time_symmetry(df, df.index[idx1], df.index[idx2])
+    layers["time_symmetry"] = bool(time_symmetry_check["passed"])
+
+    btc_layer = 0.0
+    if btc_trend is not None:
+        if direction == "long":
+            btc_layer = 0.5 if btc_trend in ("up", "neutral") else -0.5
+        else:
+            btc_layer = 0.5 if btc_trend in ("down", "neutral") else -0.5
+    layers["btc_trend_alignment"] = btc_layer
+
+    # ── Elliott bağlamsal çarpan ─────────────────────────────────────
+    major_high = df["high"].max()
+    major_low = df["low"].min()
+    entry_price = df["close"].iloc[-1]
+    major_fib618 = major_high - 0.618 * (major_high - major_low)
+    if direction == "long":
+        elliott_multiplier = 0.7 if entry_price < major_fib618 else 1.0
+    else:
+        elliott_multiplier = 0.7 if entry_price > major_fib618 else 1.0
+
+    layer1 = 1.0 if layers["wyckoff_spring_or_thrust"] else 0.0
+    layer2 = 1.0 if layers["confluence"] else 0.0
+    layer4 = layers["btc_trend_alignment"]
+    final_score = (1 + layer1 + layer2 + layer4) * elliott_multiplier
+    if layers["time_symmetry"]:
+        final_score += 0.5
+
+    if final_score < 1.5:
+        confidence = "DÜŞÜK"
+        r_multiple, risk_pct_label, position_multiplier = "0.5R", "%0.5", 0.5
+    elif final_score < 2.5:
+        confidence = "ORTA"
+        r_multiple, risk_pct_label, position_multiplier = "1.0R", "%1", 1.0
+    else:
+        confidence = "YÜKSEK"
+        r_multiple, risk_pct_label, position_multiplier = "1.5R", "%1.5-2", 1.5
+
+    risk_calc = compute_stop_and_size(df, entry_price, equity, risk_pct, direction=direction)
+
+    return {
+        "gate_passed": True,
+        "failed_conditions": failed_conditions,
+        "passed_conditions": passed_conditions,
+        "layers": layers,
+        "elliott_multiplier": elliott_multiplier,
+        "final_score": round(final_score, 3),
+        "confidence": confidence,
+        "entry": round(float(entry_price), 6),
+        "stop": round(float(risk_calc["stop_price"]), 6),
+        "r_multiple": r_multiple,
+        "position_size_pct": risk_pct_label,
+        "position_size": round(float(risk_calc["position_size"]) * position_multiplier, 6),
+        "b_time": df.index[idx2].isoformat(),  # tekrar sinyal engelleme (spec madde 10) icin
+    }
+
+
+def evaluate_double_bottom_spec_signal(df, btc_trend=None, equity=1000, risk_pct=0.015):
+    """
+    ══════════════════════════════════════════════════════════════
+    SPEC RAPORU (2026-07-14) — Kullanıcının Proje'den aldığı detaylı
+    kriterlere göre TAMAMEN AYRI bir strateji. Ana confluence gate'ini
+    (find_confluence_candidates/evaluate_confluence_entry) HİÇBİR
+    ŞEKİLDE etkilemez - ayrı CSV (okx_double_bottom_spec.csv) + ayrı
+    Telegram bildirimi.
+
+    GATE: Double Bottom/Top + RSI diverjansı + Fibonacci bandı (long/short
+    ayna simetrik). Her iki yön de GATE'i geçerse "CONFLICT" - sinyal
+    sayılmaz. Confidence katmanları (Wyckoff/confluence/zaman simetrisi/
+    BTC uyumu) + Elliott çarpanı ile DÜŞÜK/ORTA/YÜKSEK sınıflandırma.
+
+    Donus: dict - "final_signal": "VALID"|"REJECTED"|"CONFLICT"
+    ══════════════════════════════════════════════════════════════
+    """
+    pivots = find_zigzag_pivots(df)
+
+    long_result = _evaluate_spec_direction(df, "long", pivots, btc_trend, equity, risk_pct)
+    short_result = _evaluate_spec_direction(df, "short", pivots, btc_trend, equity, risk_pct)
+
+    if long_result["gate_passed"] and short_result["gate_passed"]:
+        return {
+            "final_signal": "CONFLICT", "direction": None, "confidence": None,
+            "long_detail": long_result, "short_detail": short_result,
+        }
+
+    if long_result["gate_passed"]:
+        chosen, direction = long_result, "LONG"
+    elif short_result["gate_passed"]:
+        chosen, direction = short_result, "SHORT"
+    else:
+        # Ikisi de gate'i gecemedi - REJECTED. Hangisi daha az eksikle
+        # reddedildiyse "direction_checked" olarak o gosterilir.
+        direction = "LONG" if len(long_result["failed_conditions"]) <= len(short_result["failed_conditions"]) else "SHORT"
+        return {
+            "final_signal": "REJECTED", "direction_checked": direction, "confidence": None,
+            "long_detail": long_result, "short_detail": short_result,
+        }
+
+    return {
+        "final_signal": "VALID",
+        "direction": direction,
+        "confidence": chosen["confidence"],
+        "entry": chosen["entry"], "stop": chosen["stop"],
+        "r_multiple": chosen["r_multiple"], "position_size_pct": chosen["position_size_pct"],
+        "position_size": chosen["position_size"],
+        "b_time": chosen["b_time"],
+        "score_breakdown": {
+            "gate": "PASSED",
+            "wyckoff_spring_or_thrust": chosen["layers"]["wyckoff_spring_or_thrust"],
+            "confluence": chosen["layers"]["confluence"],
+            "time_symmetry": chosen["layers"]["time_symmetry"],
+            "btc_trend_alignment": chosen["layers"]["btc_trend_alignment"],
+            "elliott_multiplier": chosen["elliott_multiplier"],
+            "final_score": chosen["final_score"],
+        },
+        "passed_conditions": chosen["passed_conditions"],
+        "long_detail": long_result, "short_detail": short_result,
+    }
+
+
+def format_spec_signal_telegram_message(symbol, spec_result):
+    """VALID spec sinyalini Telegram icin kisa, spec'in istedigi formatta
+    HTML mesajina cevirir. Sadece VALID sinyaller icin cagrilir."""
+    direction = spec_result["direction"]
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    reasons_summary = ", ".join(spec_result["passed_conditions"])
+    return (
+        f"{emoji} <b>{symbol}</b> {direction} [SPEC] — Güven: {spec_result['confidence']}\n"
+        f"Giriş: <code>{spec_result['entry']}</code> | Stop: <code>{spec_result['stop']}</code> | "
+        f"R: {spec_result['r_multiple']}\n"
+        f"Gerekçe: {reasons_summary}"
+    )
+
+
 def _json_default(obj):
     """json.dump için numpy/pandas tiplerini native Python tiplerine çevirir."""
     if isinstance(obj, np.integer):
@@ -1048,12 +1378,26 @@ def run_scanner():
     validation_results = []
     watchlist_results   = []
     abc_pattern_results = []   # EK/BAĞIMSIZ rapor - ana gate'i etkilemez
+    spec_results        = []   # EK/BAĞIMSIZ rapor (2026-07-14 spec) - ana gate'i etkilemez
     skipped_data        = 0
     skipped_crit         = 0
     previous_watchlist_state = load_previous_watchlist_state()
     previous_telegram_state = load_previous_telegram_state()
     telegram_notified_this_run = dict(previous_telegram_state)  # kopya - bu tur guncellenecek
+    previous_spec_notified_state = load_previous_spec_notified_state()
+    spec_notified_this_run = dict(previous_spec_notified_state)
     log_status(f"📈  Onceki tur state: {len(previous_watchlist_state)} coin (momentum karsilastirmasi icin)")
+
+    # BTC 4H trend'i (spec raporunun opsiyonel BTC uyum katmani icin) -
+    # taramanin basinda BIR KEZ cekilir, hata olursa None kalir (katman
+    # sessizce atlanir, ana taramayi durdurmaz).
+    btc_trend = None
+    try:
+        btc_df = fetch_ohlcv_paginated(exchange, "BTC/USDT", TIMEFRAME, since_ms=START_DATE_MS, pause=PAUSE_SEC)
+        btc_trend = get_btc_trend(btc_df)
+        log_status(f"₿  BTC 4H trend: {btc_trend}")
+    except Exception as exc:
+        log_status(f"⚠️  BTC trend hesaplanamadı (spec BTC katmanı atlanacak): {exc}")
 
     for symbol in tqdm(usdt_pairs, desc="🔍 Taranıyor", unit="coin"):
 
@@ -1094,6 +1438,43 @@ def run_scanner():
                 f"toplam=%{abc_pattern['combined_dist_pct']} | tolerans_içinde={abc_pattern['within_tolerance']}"
             )
         vol_24h = volume_by_symbol.get(symbol)
+
+        # EK/BAĞIMSIZ rapor (2026-07-14 spec): Double Bottom/Top ana gate,
+        # RSI diverjansı + Fib bandı, Wyckoff/confluence/zaman simetrisi/
+        # BTC uyumu confidence katmanları. Ana confluence gate'ini
+        # HİÇBİR ŞEKİLDE etkilemez. try/except ile korunuyor.
+        try:
+            spec_result = evaluate_double_bottom_spec_signal(df, btc_trend=btc_trend)
+        except Exception as exc:
+            spec_result = None
+            log_status(f"⚠️  [Spec] {symbol} için hata (yok sayıldı): {exc}")
+
+        if spec_result is not None:
+            spec_result["symbol"] = symbol
+            spec_result["volume_24h_usdt"] = round(float(vol_24h), 2) if vol_24h is not None else None
+            spec_results.append(spec_result)
+
+            if spec_result["final_signal"] == "VALID":
+                log_signal(
+                    f"📐  [Spec] {symbol:<16} | {spec_result['direction']} | confidence={spec_result['confidence']} | "
+                    f"entry={spec_result['entry']} stop={spec_result['stop']} r={spec_result['r_multiple']}"
+                )
+                if should_notify_spec(symbol, spec_result.get("b_time", ""), previous_spec_notified_state):
+                    spec_text = format_spec_signal_telegram_message(symbol, spec_result)
+                    if send_telegram_message(spec_text):
+                        log_status(f"📨  [Spec] Telegram bildirimi gönderildi → {symbol}")
+                        spec_notified_this_run[symbol] = {
+                            "b_time": spec_result.get("b_time", ""),
+                            "notified_at": datetime.now(timezone.utc).isoformat(),
+                        }
+            elif spec_result["final_signal"] == "CONFLICT":
+                log_signal(f"⚡  [Spec] {symbol:<16} | CONFLICT — hem LONG hem SHORT gate'i geçiyor, sinyal sayılmadı")
+            else:
+                log_signal(
+                    f"ℹ️  [Spec] {symbol:<16} | REJECTED | "
+                    f"long_failed={spec_result['long_detail']['failed_conditions']} | "
+                    f"short_failed={spec_result['short_detail']['failed_conditions']}"
+                )
 
         confluence_signal = evaluate_confluence_entry(df, candidate)
 
@@ -1187,7 +1568,7 @@ def run_scanner():
     log_status(f"  ✅  Eşleşen (Confluence — tek strateji): {len(validation_results)}")
 
     write_signal_outputs(validation_results, watchlist_results, skipped_data, skipped_crit, total)
-    save_watchlist_state(watchlist_results, telegram_notified_this_run)
+    save_watchlist_state(watchlist_results, telegram_notified_this_run, spec_notified_this_run)
 
     # ── İzleme Listesi CSV'si (0 sinyal olsa bile HER ZAMAN yazılır) ──
     if watchlist_results:
@@ -1263,6 +1644,46 @@ def run_scanner():
             abc_fn = "okx_big_wave_abc.csv"
             df_abc.to_csv(abc_fn, index=False, encoding="utf-8-sig")
             log_status(f"🌊  CSV (Büyük Dalga ABC, {len(df_abc)} coin) → {abc_fn}")
+
+    # ── Spec Raporu CSV'si (2026-07-14, EK/BAĞIMSIZ, 0 olsa bile yazılır) ──
+    if spec_results:
+        spec_rows = []
+        for r in spec_results:
+            row = {
+                "symbol": r["symbol"],
+                "final_signal": r["final_signal"],
+                "direction": r.get("direction") or r.get("direction_checked"),
+                "confidence": r.get("confidence"),
+                "entry": r.get("entry"),
+                "stop": r.get("stop"),
+                "r_multiple": r.get("r_multiple"),
+                "final_score": (r.get("score_breakdown") or {}).get("final_score"),
+                "passed_conditions": "; ".join(r.get("passed_conditions", [])) if r.get("passed_conditions") else None,
+                "long_failed": "; ".join(r["long_detail"]["failed_conditions"]),
+                "short_failed": "; ".join(r["short_detail"]["failed_conditions"]),
+                "volume_24h_usdt": r.get("volume_24h_usdt"),
+            }
+            spec_rows.append(row)
+
+        spec_col_map = {
+            "symbol": "Sembol", "final_signal": "Sonuç", "direction": "Yön",
+            "confidence": "Güven", "entry": "Giriş", "stop": "Stop", "r_multiple": "R",
+            "final_score": "Skor", "passed_conditions": "Geçen Koşullar",
+            "long_failed": "LONG Reddedilme Nedeni", "short_failed": "SHORT Reddedilme Nedeni",
+            "volume_24h_usdt": "24s Hacim (USDT)",
+        }
+        df_spec = pd.DataFrame(spec_rows)
+        df_spec = df_spec[[c for c in spec_col_map if c in df_spec.columns]]
+        df_spec = df_spec.rename(columns=spec_col_map)
+        signal_rank = {"VALID": 2, "CONFLICT": 1, "REJECTED": 0}
+        df_spec["_rank"] = df_spec["Sonuç"].map(signal_rank)
+        df_spec = df_spec.sort_values("_rank", ascending=False).drop(columns=["_rank"]).reset_index(drop=True)
+
+        if EXPORT_CSV:
+            spec_fn = "okx_double_bottom_spec.csv"
+            df_spec.to_csv(spec_fn, index=False, encoding="utf-8-sig")
+            valid_count = sum(1 for r in spec_results if r["final_signal"] == "VALID")
+            log_status(f"📐  CSV (Spec Raporu, {valid_count} VALID / {len(df_spec)} toplam) → {spec_fn}")
 
     if not validation_results:
         log_status("\n❌  Hiç aday bulunamadı (Confluence gate'ini geçen sinyal yok).")
