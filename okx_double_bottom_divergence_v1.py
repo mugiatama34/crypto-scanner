@@ -419,7 +419,7 @@ MIN_24H_VOLUME_USDT = float(os.environ.get("MIN_24H_VOLUME_USDT", 1_000_000))
 # Telegram bildirimi (okx_double_bottom_spec.csv).
 # NOT: Kullanici Fib toleransini spec'in ±%0.5'i yerine mevcut ±%3'te
 # tutmayi tercih etti (2026-07-14 karari).
-SPEC_MIN_BAR_GAP        = 10
+SPEC_MIN_BAR_GAP        = int(os.environ.get("SPEC_MIN_BAR_GAP", 8))  # spec: 10, 2026-07-15 kullanici karariyla 8'e gevsetildi
 SPEC_LEVEL_TOLERANCE    = 0.03
 SPEC_FIB_ZONE_TOLERANCE = FIB_CONFLUENCE_TOLERANCE  # ±%3, kullanicinin tercihi
 SPEC_CONFLUENCE_TOLERANCE = 0.025  # confidence katmani icin ±%2.5 (spec: %2-3 araligi)
