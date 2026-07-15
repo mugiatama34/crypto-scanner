@@ -98,8 +98,8 @@ class SignalResult:
 
 def check_double_bottom(df: pd.DataFrame, min_bar_gap: int = 8,
                          level_tolerance: float = 0.05,
-                         volume_breakout_mult: float = 1.3,
-                         breakout_window: int = 3) -> dict:
+                         volume_breakout_mult: float = 1.15,
+                         breakout_window: int = 5) -> dict:
     closes = df["close"]
     lows = find_local_lows(df["low"], order=3)
 
@@ -163,8 +163,8 @@ def check_double_bottom(df: pd.DataFrame, min_bar_gap: int = 8,
 
 def check_double_top(df: pd.DataFrame, min_bar_gap: int = 8,
                       level_tolerance: float = 0.05,
-                      volume_breakdown_mult: float = 1.3,
-                      breakdown_window: int = 3) -> dict:
+                      volume_breakdown_mult: float = 1.15,
+                      breakdown_window: int = 5) -> dict:
     highs = find_local_highs(df["high"], order=3)
 
     if len(highs) < 2:
