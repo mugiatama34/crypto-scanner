@@ -28,6 +28,7 @@
 #   python stock_scanner.py --test-symbol AAPL --debug
 
 import argparse
+import io
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 
 from okx_double_bottom_divergence_v1 import (
@@ -108,9 +110,20 @@ _FALLBACK_SP500 = [
 def fetch_sp500_symbols():
     """Wikipedia'dan güncel S&P 500 listesini çeker. Başarısız olursa
     (ağ, sayfa formatı değişikliği vb.) küçük, sabit bir yedek listeye
-    düşer - script ASLA tamamen durmaz."""
+    düşer - script ASLA tamamen durmaz.
+
+    NOT: pd.read_html(url) DOĞRUDAN çağrılırsa Wikipedia genelde 403
+    Forbidden döner - User-Agent göndermeyen isteklere karşı koruma var.
+    Bunun için requests ile tarayıcı gibi bir User-Agent'la sayfa HTML'i
+    çekilip pd.read_html'e METİN olarak veriliyor (URL değil)."""
     try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; stock-scanner/1.0)"}
+        resp = requests.get(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers=headers, timeout=15,
+        )
+        resp.raise_for_status()
+        tables = pd.read_html(io.StringIO(resp.text))
         symbols = tables[0]["Symbol"].astype(str).tolist()
         # yfinance nokta yerine tire ister: BRK.B -> BRK-B
         symbols = [s.strip().replace(".", "-") for s in symbols]
