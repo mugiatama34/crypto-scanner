@@ -125,4 +125,35 @@ birebir eşleştiğini doğruladım. Kendi bilgisayarında normal internet
 erişimiyle çalıştırdığında `yfinance` gerçek Yahoo Finance verisini
 çekecektir — ek bir ayar gerekmez.
 
-Henüz **yok**: etiket/tarih filtreleme.
+## Adım 5 durumu: Etiketleme ve Filtreleme (tamamlandı)
+
+- Özet ekranındaki **Pozisyonlar** tablosunda etiket filtresi (dropdown,
+  seçince otomatik uyguluyor).
+- **İşlemler** ekranında etiket filtresi + tarih filtresi (Bu hafta / Bu
+  ay / Bu yıl / Tümü — takvim bazlı: "bu hafta" pazartesiden bugüne,
+  "bu ay" ayın 1'inden bugüne, "bu yıl" 1 Ocak'tan bugüne).
+- Etiketler zaten işlem eklerken serbest metin olarak giriliyordu (adım
+  1); bu adımda sadece bunları filtrelemek için arayüz eklendi, veri
+  modelinde değişiklik yok.
+
+---
+
+## MVP tamamlandı
+
+Başlangıçta planlanan 4 adım + etiketleme/filtreleme tamamlandı. Özetle
+elindeki uygulama:
+- İşlem kaydı (FIFO eşleştirmeli, notlu)
+- Portföy özeti (toplam değer, gerçekleşmemiş/gerçekleşmiş K/Z, nakit,
+  girişten itibaren ve günlük/haftalık/aylık/YTD performans)
+- Pozisyon detayı (açık lotlar, kapanan eşleşmeler, işlem geçmişi/notlar)
+- yfinance ile güncel fiyat (önbellekli + manuel yenile)
+- Etiket ve tarih filtreleme
+
+**Kendi bilgisayarında denemek için:**
+```bash
+cd portfolio-tracker
+pip install -r requirements.txt
+python app.py
+```
+sonra `http://127.0.0.1:5000` adresine git. İlk açılışta `portfolio.db`
+otomatik oluşur; verilerin orada kalıcı olarak saklanır.

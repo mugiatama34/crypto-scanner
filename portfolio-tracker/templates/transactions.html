@@ -49,6 +49,26 @@
 
 <section class="card">
     <h2>İşlem Geçmişi</h2>
+    <form method="get" action="{{ url_for('transactions') }}" class="filter-row">
+        <label for="tag-filter">Etiket:</label>
+        <select id="tag-filter" name="tag">
+            <option value="">Tümü</option>
+            {% for t in tags %}
+            <option value="{{ t }}" {{ 'selected' if t == tag_filter else '' }}>{{ t }}</option>
+            {% endfor %}
+        </select>
+        <label for="period-filter">Tarih:</label>
+        <select id="period-filter" name="period">
+            <option value="">Tümü</option>
+            <option value="week" {{ 'selected' if period_filter == 'week' else '' }}>Bu hafta</option>
+            <option value="month" {{ 'selected' if period_filter == 'month' else '' }}>Bu ay</option>
+            <option value="year" {{ 'selected' if period_filter == 'year' else '' }}>Bu yıl</option>
+        </select>
+        <button type="submit" class="btn-secondary">Filtrele</button>
+        {% if tag_filter or period_filter %}
+        <a href="{{ url_for('transactions') }}" class="hint-inline">Filtreyi temizle</a>
+        {% endif %}
+    </form>
     {% if transactions %}
     <div class="table-wrap">
         <table>
@@ -87,6 +107,8 @@
             </tbody>
         </table>
     </div>
+    {% elif tag_filter or period_filter %}
+    <p class="empty-state">Bu filtreyle eşleşen işlem yok.</p>
     {% else %}
     <p class="empty-state">Henüz işlem yok. Yukarıdaki formdan ilk işlemini ekle.</p>
     {% endif %}

@@ -12,6 +12,18 @@ app.secret_key = "portfolio-tracker-local"  # sadece flash mesajlari icin, tek k
 db.init_db()
 
 
+def _period_start_date(period, today):
+    """'week' / 'month' / 'year' icin o takvim doneminin baslangic
+    tarihini (ISO string) dondurur. Taninmayan/bos period icin None."""
+    if period == "week":
+        return (today - timedelta(days=today.weekday())).isoformat()
+    if period == "month":
+        return date(today.year, today.month, 1).isoformat()
+    if period == "year":
+        return date(today.year, 1, 1).isoformat()
+    return None
+
+
 @app.route("/")
 def dashboard():
     conn = db.get_connection()
@@ -20,6 +32,13 @@ def dashboard():
     price_lookup, last_fetched_at = prices.get_current_prices(conn, symbols)
 
     result = portfolio.compute_portfolio(conn, price_lookup)
+
+    all_tags = sorted({p["tag"] for p in result["positions"] if p["tag"]})
+    tag_filter = request.args.get("tag", "").strip()
+    positions = result["positions"]
+    if tag_filter:
+        positions = [p for p in positions if p["tag"] == tag_filter]
+
     cash_balance = portfolio.compute_cash_balance(conn)
     all_time = portfolio.compute_all_time_performance(
         conn, result["total_market_value"], cash_balance
@@ -41,7 +60,9 @@ def dashboard():
 
     return render_template(
         "dashboard.html",
-        positions=result["positions"],
+        positions=positions,
+        all_tags=all_tags,
+        tag_filter=tag_filter,
         total_market_value=result["total_market_value"],
         total_unrealized_pnl=result["total_unrealized_pnl"],
         total_unrealized_pnl_pct=result["total_unrealized_pnl_pct"],
@@ -113,17 +134,36 @@ def add_cash_flow():
 
 @app.route("/transactions")
 def transactions():
+    tag_filter = request.args.get("tag", "").strip()
+    period_filter = request.args.get("period", "").strip()
+
     conn = db.get_connection()
-    rows = conn.execute(
-        "SELECT * FROM transactions ORDER BY tx_date DESC, id DESC"
-    ).fetchall()
+    all_tags = sorted(
+        r["tag"] for r in conn.execute(
+            "SELECT DISTINCT tag FROM transactions WHERE tag IS NOT NULL AND tag != ''"
+        ).fetchall()
+    )
+
+    query = "SELECT * FROM transactions WHERE 1=1"
+    params = []
+    if tag_filter:
+        query += " AND tag = ?"
+        params.append(tag_filter)
+    period_start = _period_start_date(period_filter, date.today())
+    if period_start:
+        query += " AND tx_date >= ?"
+        params.append(period_start)
+    query += " ORDER BY tx_date DESC, id DESC"
+
+    rows = conn.execute(query, params).fetchall()
     conn.close()
 
-    tags = sorted({r["tag"] for r in rows if r["tag"]})
     return render_template(
         "transactions.html",
         transactions=rows,
-        tags=tags,
+        tags=all_tags,
+        tag_filter=tag_filter,
+        period_filter=period_filter,
         today=date.today().isoformat(),
     )
 

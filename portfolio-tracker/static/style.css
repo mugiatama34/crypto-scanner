@@ -260,3 +260,20 @@ td.symbol {
     border-radius: 6px;
     font-size: 13px;
 }
+
+.filter-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.filter-row label {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.filter-row select {
+    padding: 6px 8px;
+}
