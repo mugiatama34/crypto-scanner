@@ -69,5 +69,20 @@ geçmiş piyasa fiyatı gerektiriyor ve 4. adımda (yfinance entegrasyonu)
 eklenecek. Girişten itibaren (all-time) performans ise geçmiş fiyata
 ihtiyaç duymadığı için şimdiden doğru hesaplanıyor.
 
-Henüz **yok**: pozisyon detay sayfası (açık lotlar, sembole ait işlem
-geçmişi), canlı fiyat, zaman dilimi performansı, etiket/tarih filtreleme.
+## Adım 3 durumu: Pozisyon Detayı
+
+Şu an eklenen:
+- `/positions/<sembol>` sayfası (özet ekranındaki sembol adına
+  tıklayınca açılıyor): net adet, ortalama maliyet, güncel fiyat,
+  piyasa değeri, gerçekleşmemiş/gerçekleşmiş K/Z.
+- **Açık Lotlar (FIFO)** tablosu: hangi tarihte, hangi fiyattan alınan
+  lotların hâlâ elde olduğu.
+- **Kapanan Eşleşmeler** tablosu: her satışın hangi alım lotunu/lotlarını
+  kapattığı ve o eşleşmeden doğan gerçekleşen K/Z.
+- **İşlem Geçmişi** tablosu: o sembole ait tüm alım/satımlar ve alım
+  anında yazdığın notlar (tez/katalizör), en yeniden eskiye.
+- Olmayan bir sembol için `/positions/...` adresine gidilirse 404
+  dönüyor.
+
+Henüz **yok**: canlı fiyat, zaman dilimi performansı, etiket/tarih
+filtreleme.

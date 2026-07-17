@@ -1,6 +1,6 @@
 from datetime import date
 
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import Flask, abort, flash, redirect, render_template, request, url_for
 
 import db
 import portfolio
@@ -33,6 +33,18 @@ def dashboard():
         all_time=all_time,
         today=date.today().isoformat(),
     )
+
+
+@app.route("/positions/<symbol>")
+def position_detail(symbol):
+    conn = db.get_connection()
+    detail = portfolio.compute_position_detail(conn, symbol.upper())
+    conn.close()
+
+    if detail is None:
+        abort(404)
+
+    return render_template("position.html", p=detail)
 
 
 @app.route("/cash/add", methods=["POST"])

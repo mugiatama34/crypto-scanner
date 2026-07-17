@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}{{ p.symbol }} - Portföy Takip{% endblock %}
+{% block content %}
+
+<p><a href="{{ url_for('dashboard') }}">&larr; Özete dön</a></p>
+
+<section class="card">
+    <h2>
+        {{ p.symbol }}
+        {% if p.tag %}<span class="tag-pill">{{ p.tag }}</span>{% endif %}
+    </h2>
+    <div class="stat-grid">
+        <div class="stat-box">
+            <div class="label">Net Adet</div>
+            <div class="value">{{ p.open_qty }}</div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Ortalama Maliyet</div>
+            <div class="value">${{ '%.2f'|format(p.avg_cost) }}</div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Güncel Fiyat</div>
+            <div class="value">
+                ${{ '%.2f'|format(p.current_price) }}
+                {% if not p.price_is_live %}<span class="hint-inline">(son işlem fiyatı)</span>{% endif %}
+            </div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Piyasa Değeri</div>
+            <div class="value">${{ '%.2f'|format(p.market_value) }}</div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Gerçekleşmemiş K/Z</div>
+            <div class="value {{ 'pnl-positive' if p.unrealized_pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if p.unrealized_pnl >= 0 else '' }}${{ '%.2f'|format(p.unrealized_pnl) }}
+            </div>
+            <div class="subvalue {{ 'pnl-positive' if p.unrealized_pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if p.unrealized_pnl_pct >= 0 else '' }}{{ '%.2f'|format(p.unrealized_pnl_pct) }}%
+            </div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Gerçekleşmiş K/Z</div>
+            <div class="value {{ 'pnl-positive' if p.realized_pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if p.realized_pnl >= 0 else '' }}${{ '%.2f'|format(p.realized_pnl) }}
+            </div>
+            <div class="subvalue {{ 'pnl-positive' if p.realized_pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if p.realized_pnl_pct >= 0 else '' }}{{ '%.2f'|format(p.realized_pnl_pct) }}%
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="card">
+    <h2>Açık Lotlar (FIFO)</h2>
+    {% if p.open_lots %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Alım Tarihi</th>
+                    <th>Adet</th>
+                    <th>Alım Fiyatı</th>
+                    <th>Maliyet</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for lot in p.open_lots %}
+                <tr>
+                    <td>{{ lot.date }}</td>
+                    <td>{{ lot.quantity }}</td>
+                    <td>${{ '%.2f'|format(lot.price) }}</td>
+                    <td>${{ '%.2f'|format(lot.quantity * lot.price) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty-state">Açık lot yok — bu pozisyon tamamen kapatılmış.</p>
+    {% endif %}
+</section>
+
+{% if p.closed_matches %}
+<section class="card">
+    <h2>Kapanan Eşleşmeler (Satışlar)</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Satış Tarihi</th>
+                    <th>Adet</th>
+                    <th>Alım Fiyatı</th>
+                    <th>Satış Fiyatı</th>
+                    <th>Gerçekleşen K/Z</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for m in p.closed_matches %}
+                <tr>
+                    <td>{{ m.sell_date }}</td>
+                    <td>{{ m.quantity }}</td>
+                    <td>${{ '%.2f'|format(m.buy_price) }} <span class="hint-inline">({{ m.buy_date }})</span></td>
+                    <td>${{ '%.2f'|format(m.sell_price) }}</td>
+                    <td class="{{ 'pnl-positive' if m.realized_pnl >= 0 else 'pnl-negative' }}">
+                        {{ '+' if m.realized_pnl >= 0 else '' }}${{ '%.2f'|format(m.realized_pnl) }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+
+<section class="card">
+    <h2>İşlem Geçmişi ve Notlar</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Tarih</th>
+                    <th>Tip</th>
+                    <th>Adet</th>
+                    <th>Fiyat</th>
+                    <th>Toplam</th>
+                    <th>Not</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for tx in p.transactions %}
+                <tr>
+                    <td>{{ tx.tx_date }}</td>
+                    <td><span class="badge badge-{{ tx.tx_type }}">{{ 'Alım' if tx.tx_type == 'buy' else 'Satım' }}</span></td>
+                    <td>{{ tx.quantity }}</td>
+                    <td>${{ '%.2f'|format(tx.price) }}</td>
+                    <td>${{ '%.2f'|format(tx.total) }}</td>
+                    <td class="note-cell">{{ tx.note or '' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+{% endblock %}

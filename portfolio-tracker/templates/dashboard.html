@@ -99,7 +99,7 @@
             <tbody>
                 {% for p in positions %}
                 <tr>
-                    <td class="symbol">{{ p.symbol }}</td>
+                    <td class="symbol"><a href="{{ url_for('position_detail', symbol=p.symbol) }}">{{ p.symbol }}</a></td>
                     <td>{% if p.tag %}<span class="tag-pill">{{ p.tag }}</span>{% endif %}</td>
                     <td>{{ p.open_qty }}</td>
                     <td>${{ '%.2f'|format(p.avg_cost) }}</td>

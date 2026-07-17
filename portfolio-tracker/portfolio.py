@@ -111,6 +111,57 @@ def compute_portfolio(conn, price_lookup=None):
     }
 
 
+def compute_position_detail(conn, symbol, price_lookup=None):
+    """Tek bir sembol icin FIFO detayi: acik lotlar, kapanan eslesmeler,
+    tum islem gecmisi ve ozet rakamlar. Sembole ait hic islem yoksa None
+    doner."""
+    price_lookup = price_lookup or {}
+    txs = conn.execute(
+        "SELECT * FROM transactions WHERE symbol = ? ORDER BY tx_date, id", (symbol,)
+    ).fetchall()
+    if not txs:
+        return None
+
+    open_lots, closed = match_fifo(txs)
+
+    open_qty = sum(lot.quantity for lot in open_lots)
+    cost_basis = sum(lot.quantity * lot.price for lot in open_lots)
+    avg_cost = cost_basis / open_qty if open_qty > EPSILON else 0.0
+
+    current_price = price_lookup.get(symbol)
+    price_is_live = current_price is not None
+    if current_price is None:
+        current_price = txs[-1]["price"]
+
+    market_value = open_qty * current_price
+    unrealized_pnl = market_value - cost_basis
+    unrealized_pnl_pct = (unrealized_pnl / cost_basis * 100) if cost_basis > EPSILON else 0.0
+
+    realized_pnl = sum(m.realized_pnl for m in closed)
+    realized_cost = sum(m.quantity * m.buy_price for m in closed)
+    realized_pnl_pct = (realized_pnl / realized_cost * 100) if realized_cost > EPSILON else 0.0
+
+    tags = get_symbol_tags(conn)
+
+    return {
+        "symbol": symbol,
+        "tag": tags.get(symbol),
+        "open_qty": open_qty,
+        "avg_cost": avg_cost,
+        "cost_basis": cost_basis,
+        "current_price": current_price,
+        "price_is_live": price_is_live,
+        "market_value": market_value,
+        "unrealized_pnl": unrealized_pnl,
+        "unrealized_pnl_pct": unrealized_pnl_pct,
+        "realized_pnl": realized_pnl,
+        "realized_pnl_pct": realized_pnl_pct,
+        "open_lots": open_lots,
+        "closed_matches": closed,
+        "transactions": list(reversed(txs)),
+    }
+
+
 def compute_cash_balance(conn):
     """Nakit bakiyesi = yatirilan sermaye - cekilen - alimlar + satimlar."""
     deposits = conn.execute(
