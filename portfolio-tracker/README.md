@@ -13,6 +13,13 @@ python app.py
 
 Sonra tarayıcıdan `http://127.0.0.1:5000` adresine git.
 
+**Windows'ta `python`/`pip` komutu bulunamıyorsa:** bazı Windows
+kurulumlarında (özellikle şirket bilgisayarlarında) `python` komutu
+Microsoft Store'a yönlendiren sahte bir kısayolla çakışabiliyor. Gerçek
+Python'ın nereye kurulduğunu bulup (`C:\Program Files\Python313\` gibi),
+o klasörü PATH'e eklemek veya `baslat.bat` dosyasını (bu klasörde,
+kendi kurulum yoluna göre düzenleyerek) kullanmak sorunu çözer.
+
 ## Veriler nasıl saklanıyor?
 
 Uygulama ilk çalıştığında yanına `portfolio.db` adında bir dosya oluşturuyor.
