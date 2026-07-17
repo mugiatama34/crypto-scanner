@@ -1,14 +1,18 @@
 """Portfoy hesaplamalari: pozisyon ozetleri, gerceklesen/gerceklesmeyen K/Z,
-nakit bakiyesi ve girisden itibaren (all-time) performans.
+nakit bakiyesi, girisden itibaren (all-time) performans ve gunluk/haftalik/
+aylik/YTD donem karsilastirmalari.
 
-Zaman dilimi (gunluk/haftalik/aylik/YTD) performans karsilastirmalari,
-gecmis piyasa fiyati gerektirdigi icin fiyat API'si baglandiginda
-(4. adim) eklenecek.
+Donem karsilastirmalari, o donemin basindaki net degeri (o tarihteki
+hisse adetleri x o tarihteki kapanis fiyati + o tarihteki nakit) bugunku
+net degerle kiyaslar; donem icinde yapilan yeni yatirim/cekimler bu
+kiyaslamadan ayristirilir (yoksa yeni para yatirmak sahte bir "kazanc"
+gibi gorunurdu).
 """
 
 from collections import defaultdict
 
 from fifo import match_fifo
+from prices import price_on_or_before
 
 EPSILON = 1e-9
 
@@ -160,6 +164,101 @@ def compute_position_detail(conn, symbol, price_lookup=None):
         "closed_matches": closed,
         "transactions": list(reversed(txs)),
     }
+
+
+def compute_open_quantities_as_of(conn, as_of_date):
+    """Her sembol icin, belirli bir tarihte elde olan (acik) adedi
+    hesaplar - o tarihten sonraki islemler sayilmaz."""
+    grouped = get_transactions_by_symbol(conn)
+    quantities = {}
+    for symbol, txs in grouped.items():
+        filtered = [t for t in txs if t["tx_date"] <= as_of_date]
+        if not filtered:
+            continue
+        open_lots, _ = match_fifo(filtered)
+        qty = sum(lot.quantity for lot in open_lots)
+        if qty > EPSILON:
+            quantities[symbol] = qty
+    return quantities
+
+
+def compute_cash_balance_as_of(conn, as_of_date):
+    deposits = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM cash_flows "
+        "WHERE flow_type = 'deposit' AND flow_date <= ?",
+        (as_of_date,),
+    ).fetchone()["s"]
+    withdrawals = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM cash_flows "
+        "WHERE flow_type = 'withdrawal' AND flow_date <= ?",
+        (as_of_date,),
+    ).fetchone()["s"]
+    buys = conn.execute(
+        "SELECT COALESCE(SUM(total), 0) AS s FROM transactions "
+        "WHERE tx_type = 'buy' AND tx_date <= ?",
+        (as_of_date,),
+    ).fetchone()["s"]
+    sells = conn.execute(
+        "SELECT COALESCE(SUM(total), 0) AS s FROM transactions "
+        "WHERE tx_type = 'sell' AND tx_date <= ?",
+        (as_of_date,),
+    ).fetchone()["s"]
+    return deposits - withdrawals - buys + sells
+
+
+def compute_net_worth_as_of(conn, as_of_date, price_history):
+    """price_history: {symbol: {tarih_str: kapanis_fiyati}}.
+
+    Donus: (net_deger, tum_fiyatlar_bulundu_mu). Bir sembolun o tarihteki
+    fiyati bulunamazsa tum_fiyatlar_bulundu_mu False doner - cagiran taraf
+    bu durumda "eksik veri" olarak isaretlemeli, 0 degerinde varsaymamali.
+    """
+    quantities = compute_open_quantities_as_of(conn, as_of_date)
+    market_value = 0.0
+    all_priced = True
+    for symbol, qty in quantities.items():
+        price = price_on_or_before(price_history.get(symbol, {}), as_of_date)
+        if price is None:
+            all_priced = False
+            continue
+        market_value += qty * price
+    cash = compute_cash_balance_as_of(conn, as_of_date)
+    return market_value + cash, all_priced
+
+
+def compute_net_deposits_between(conn, start_date, end_date):
+    """start_date haric, end_date dahil araliktaki net yatirim (yatirim -
+    cekim). Donem performansindan yeni sermaye etkisini ayiklamak icin."""
+    deposits = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM cash_flows "
+        "WHERE flow_type = 'deposit' AND flow_date > ? AND flow_date <= ?",
+        (start_date, end_date),
+    ).fetchone()["s"]
+    withdrawals = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM cash_flows "
+        "WHERE flow_type = 'withdrawal' AND flow_date > ? AND flow_date <= ?",
+        (start_date, end_date),
+    ).fetchone()["s"]
+    return deposits - withdrawals
+
+
+def compute_period_performance(conn, periods, current_net_worth, price_history, today_str):
+    """periods: {etiket: baslangic_tarih_str}.
+
+    Donus: {etiket: {"pnl": ..., "pnl_pct": ...} veya None (fiyat verisi
+    eksikse)}.
+    """
+    results = {}
+    for label, start_date in periods.items():
+        start_net_worth, all_priced = compute_net_worth_as_of(conn, start_date, price_history)
+        if not all_priced:
+            results[label] = None
+            continue
+        net_deposits = compute_net_deposits_between(conn, start_date, today_str)
+        pnl = current_net_worth - start_net_worth - net_deposits
+        pnl_pct = (pnl / start_net_worth * 100) if start_net_worth > EPSILON else 0.0
+        results[label] = {"pnl": pnl, "pnl_pct": pnl_pct}
+    return results
 
 
 def compute_cash_balance(conn):

@@ -45,9 +45,41 @@
             </div>
         </div>
     </div>
+    <div class="refresh-row">
+        <form method="post" action="{{ url_for('refresh_prices') }}">
+            <button type="submit" class="btn-secondary">Fiyatları Yenile</button>
+        </form>
+        {% if last_fetched_at %}
+        <span class="hint-inline">Son güncelleme: {{ last_fetched_at.split('T')[0] }} {{ last_fetched_at.split('T')[1][:5] }} UTC</span>
+        {% else %}
+        <span class="hint-inline">Fiyat verisi henüz çekilemedi.</span>
+        {% endif %}
+    </div>
+</section>
+
+<section class="card">
+    <h2>Dönem Karşılaştırmaları</h2>
+    <div class="stat-grid">
+        {% for label, key in [('Günlük', 'daily'), ('Haftalık', 'weekly'), ('Aylık', 'monthly'), ('YTD', 'ytd')] %}
+        <div class="stat-box">
+            <div class="label">{{ label }}</div>
+            {% set perf = period_performance[key] %}
+            {% if perf %}
+            <div class="value {{ 'pnl-positive' if perf.pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if perf.pnl >= 0 else '' }}${{ '%.2f'|format(perf.pnl) }}
+            </div>
+            <div class="subvalue {{ 'pnl-positive' if perf.pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if perf.pnl_pct >= 0 else '' }}{{ '%.2f'|format(perf.pnl_pct) }}%
+            </div>
+            {% else %}
+            <div class="value hint-inline">Fiyat verisi yok</div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
     <p class="hint">
-        Günlük / haftalık / aylık / YTD performans karşılaştırmaları, geçmiş piyasa
-        fiyatı gerektirdiği için fiyat API'si bağlandığında (bir sonraki adımda) eklenecek.
+        Yeni yatırım/çekimlerin etkisi bu karşılaştırmalardan ayıklanmıştır — sadece
+        yatırımların kendi performansını gösterir.
     </p>
 </section>
 

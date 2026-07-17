@@ -84,5 +84,45 @@ ihtiyaç duymadığı için şimdiden doğru hesaplanıyor.
 - Olmayan bir sembol için `/positions/...` adresine gidilirse 404
   dönüyor.
 
-Henüz **yok**: canlı fiyat, zaman dilimi performansı, etiket/tarih
-filtreleme.
+## Adım 4 durumu: Fiyat API Entegrasyonu
+
+**Neden yfinance?** Üç seçeneği karşılaştırdım:
+
+| Seçenek | Neden / neden değil |
+|---|---|
+| **yfinance (seçildi)** | API anahtarı gerekmiyor, hisse+ETF+kripto destekliyor, geçmiş fiyat verisini de (dönem karşılaştırmaları için şart) ücretsiz sağlıyor. |
+| Alpha Vantage | Ücretsiz katman dakikada 5 / günde 25 istekle sınırlı — birkaç pozisyonu bile güncellemek yetersiz kalıyor. |
+| Finnhub | Ücretsiz katmanda geçmiş (tarihsel) fiyat verisi yok — dönem karşılaştırmaları için kullanılamıyor. |
+
+Şu an eklenen:
+- `prices.py`: Yahoo Finance'ten güncel fiyat ve geçmiş kapanış
+  fiyatlarını çeken modül. Ağ hatası / bulunamayan sembol durumunda
+  sessizce boş/`None` döner — uygulama asla bu yüzden çökmez, sadece o
+  sembol için "son işlem fiyatı" gösterilmeye devam eder.
+- **Fiyat önbelleği** (`price_cache` tablosu): fiyatlar veritabanında
+  saklanır, 4 saatten taze ise tekrar ağa gidilmez. Böylece her sayfa
+  yenilemesi Yahoo Finance'e istek atmıyor.
+- **"Fiyatları Yenile" butonu** (özet ekranında): önbelleği görmezden
+  gelip anında güncel fiyat çeker; en son ne zaman güncellendiği de
+  gösterilir.
+- **Dönem karşılaştırmaları** (Günlük / Haftalık / Aylık / YTD): her
+  dönemin başındaki net değeri (o tarihteki hisse adetleri × o tarihteki
+  kapanış fiyatı + o tarihteki nakit) bugünkü net değerle kıyaslıyor.
+  Dönem içinde yapılan yeni yatırım/çekimler bu kıyaslamadan
+  ayıklanıyor — yoksa yeni para yatırmak sahte bir "kazanç" gibi
+  görünürdü. Bir sembolün o tarihe ait fiyatı bulunamazsa (örn. ağ
+  sorunu), o dönem için sayı yerine "Fiyat verisi yok" gösteriliyor —
+  yanlış/uydurma bir rakam asla gösterilmiyor.
+- Pozisyon detay sayfası da artık canlı fiyatı kullanıyor.
+
+**Not (test ortamı hakkında):** Bu görevi yürüttüğüm sanal ortamın ağ
+politikası Yahoo Finance'e erişimi engelliyor (kurumsal proxy 403
+döndürüyor), bu yüzden gerçek bir Yahoo bağlantısını burada
+gösteremedim. Tüm hesaplama mantığını (önbellekleme, dönem
+karşılaştırmaları, FIFO ile geçmiş pozisyon hesabı) sahte/mock fiyat
+verisiyle uçtan uca test ettim ve elle hesapladığım beklenen sonuçlarla
+birebir eşleştiğini doğruladım. Kendi bilgisayarında normal internet
+erişimiyle çalıştırdığında `yfinance` gerçek Yahoo Finance verisini
+çekecektir — ek bir ayar gerekmez.
+
+Henüz **yok**: etiket/tarih filtreleme.

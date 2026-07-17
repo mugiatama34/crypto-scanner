@@ -244,3 +244,19 @@ td.symbol {
     font-size: 11px;
     color: var(--text-muted);
 }
+
+.refresh-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.btn-secondary {
+    background: white;
+    color: var(--primary);
+    border: 1px solid var(--primary);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+}

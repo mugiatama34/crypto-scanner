@@ -1,9 +1,10 @@
-from datetime import date
+from datetime import date, timedelta
 
 from flask import Flask, abort, flash, redirect, render_template, request, url_for
 
 import db
 import portfolio
+import prices
 
 app = Flask(__name__)
 app.secret_key = "portfolio-tracker-local"  # sadece flash mesajlari icin, tek kullanicili yerel araç
@@ -14,11 +15,28 @@ db.init_db()
 @app.route("/")
 def dashboard():
     conn = db.get_connection()
-    result = portfolio.compute_portfolio(conn)
+    symbols = list(portfolio.get_transactions_by_symbol(conn).keys())
+
+    price_lookup, last_fetched_at = prices.get_current_prices(conn, symbols)
+
+    result = portfolio.compute_portfolio(conn, price_lookup)
     cash_balance = portfolio.compute_cash_balance(conn)
     all_time = portfolio.compute_all_time_performance(
         conn, result["total_market_value"], cash_balance
     )
+
+    today = date.today()
+    periods = {
+        "daily": (today - timedelta(days=1)).isoformat(),
+        "weekly": (today - timedelta(days=7)).isoformat(),
+        "monthly": (today - timedelta(days=30)).isoformat(),
+        "ytd": date(today.year, 1, 1).isoformat(),
+    }
+    price_history = prices.get_price_history(symbols, min(periods.values())) if symbols else {}
+    period_performance = portfolio.compute_period_performance(
+        conn, periods, all_time["net_worth"], price_history, today.isoformat()
+    )
+
     conn.close()
 
     return render_template(
@@ -31,20 +49,35 @@ def dashboard():
         total_realized_pnl_pct=result["total_realized_pnl_pct"],
         cash_balance=cash_balance,
         all_time=all_time,
-        today=date.today().isoformat(),
+        period_performance=period_performance,
+        last_fetched_at=last_fetched_at,
+        today=today.isoformat(),
     )
 
 
 @app.route("/positions/<symbol>")
 def position_detail(symbol):
+    symbol = symbol.upper()
     conn = db.get_connection()
-    detail = portfolio.compute_position_detail(conn, symbol.upper())
+    price_lookup, _ = prices.get_current_prices(conn, [symbol])
+    detail = portfolio.compute_position_detail(conn, symbol, price_lookup)
     conn.close()
 
     if detail is None:
         abort(404)
 
     return render_template("position.html", p=detail)
+
+
+@app.route("/prices/refresh", methods=["POST"])
+def refresh_prices():
+    conn = db.get_connection()
+    symbols = list(portfolio.get_transactions_by_symbol(conn).keys())
+    prices.get_current_prices(conn, symbols, force_refresh=True)
+    conn.close()
+
+    flash("Fiyatlar güncellendi.", "success")
+    return redirect(url_for("dashboard"))
 
 
 @app.route("/cash/add", methods=["POST"])

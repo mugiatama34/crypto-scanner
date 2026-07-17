@@ -26,6 +26,12 @@ CREATE TABLE IF NOT EXISTS cash_flows (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS price_cache (
+    symbol TEXT PRIMARY KEY,
+    price REAL NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_transactions_symbol ON transactions(symbol);
 CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(tx_date);
 """
