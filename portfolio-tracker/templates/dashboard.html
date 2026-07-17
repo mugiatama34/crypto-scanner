@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Özet - Portföy Takip{% endblock %}
+{% block content %}
+
+<section class="card">
+    <h2>Portföy Özeti</h2>
+    <div class="stat-grid">
+        <div class="stat-box">
+            <div class="label">Toplam Portföy Değeri</div>
+            <div class="value">${{ '%.2f'|format(total_market_value) }}</div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Gerçekleşmemiş K/Z</div>
+            <div class="value {{ 'pnl-positive' if total_unrealized_pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if total_unrealized_pnl >= 0 else '' }}${{ '%.2f'|format(total_unrealized_pnl) }}
+            </div>
+            <div class="subvalue {{ 'pnl-positive' if total_unrealized_pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if total_unrealized_pnl_pct >= 0 else '' }}{{ '%.2f'|format(total_unrealized_pnl_pct) }}%
+            </div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Gerçekleşmiş K/Z</div>
+            <div class="value {{ 'pnl-positive' if total_realized_pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if total_realized_pnl >= 0 else '' }}${{ '%.2f'|format(total_realized_pnl) }}
+            </div>
+            <div class="subvalue {{ 'pnl-positive' if total_realized_pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if total_realized_pnl_pct >= 0 else '' }}{{ '%.2f'|format(total_realized_pnl_pct) }}%
+            </div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Nakit Bakiyesi</div>
+            <div class="value">${{ '%.2f'|format(cash_balance) }}</div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Net Değer (Portföy + Nakit)</div>
+            <div class="value">${{ '%.2f'|format(all_time.net_worth) }}</div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Girişten İtibaren (All-time)</div>
+            <div class="value {{ 'pnl-positive' if all_time.pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if all_time.pnl >= 0 else '' }}${{ '%.2f'|format(all_time.pnl) }}
+            </div>
+            <div class="subvalue {{ 'pnl-positive' if all_time.pnl >= 0 else 'pnl-negative' }}">
+                {{ '+' if all_time.pnl_pct >= 0 else '' }}{{ '%.2f'|format(all_time.pnl_pct) }}%
+            </div>
+        </div>
+    </div>
+    <p class="hint">
+        Günlük / haftalık / aylık / YTD performans karşılaştırmaları, geçmiş piyasa
+        fiyatı gerektirdiği için fiyat API'si bağlandığında (bir sonraki adımda) eklenecek.
+    </p>
+</section>
+
+<section class="card">
+    <h2>Nakit Hareketi Ekle</h2>
+    <form method="post" action="{{ url_for('add_cash_flow') }}" class="tx-form">
+        <div class="field">
+            <label for="flow_type">Tür</label>
+            <select id="flow_type" name="flow_type" required>
+                <option value="deposit">Yatırım (para yatırma)</option>
+                <option value="withdrawal">Çekim (para çekme)</option>
+            </select>
+        </div>
+        <div class="field">
+            <label for="flow_date">Tarih</label>
+            <input type="date" id="flow_date" name="flow_date" value="{{ today }}" required>
+        </div>
+        <div class="field">
+            <label for="amount">Tutar ($)</label>
+            <input type="number" id="amount" name="amount" step="any" min="0" required>
+        </div>
+        <div class="field field-wide">
+            <label for="note">Not</label>
+            <input type="text" id="note" name="note" placeholder="opsiyonel">
+        </div>
+        <div class="field field-wide">
+            <button type="submit">Kaydet</button>
+        </div>
+    </form>
+</section>
+
+<section class="card">
+    <h2>Pozisyonlar</h2>
+    {% if positions %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Sembol</th>
+                    <th>Etiket</th>
+                    <th>Adet</th>
+                    <th>Ort. Maliyet</th>
+                    <th>Güncel Fiyat</th>
+                    <th>Piyasa Değeri</th>
+                    <th>Gerçekleşmemiş K/Z</th>
+                    <th>Gerçekleşmiş K/Z</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in positions %}
+                <tr>
+                    <td class="symbol">{{ p.symbol }}</td>
+                    <td>{% if p.tag %}<span class="tag-pill">{{ p.tag }}</span>{% endif %}</td>
+                    <td>{{ p.open_qty }}</td>
+                    <td>${{ '%.2f'|format(p.avg_cost) }}</td>
+                    <td>
+                        ${{ '%.2f'|format(p.current_price) }}
+                        {% if not p.price_is_live %}<span class="hint-inline">(son işlem fiyatı)</span>{% endif %}
+                    </td>
+                    <td>${{ '%.2f'|format(p.market_value) }}</td>
+                    <td class="{{ 'pnl-positive' if p.unrealized_pnl >= 0 else 'pnl-negative' }}">
+                        {{ '+' if p.unrealized_pnl >= 0 else '' }}${{ '%.2f'|format(p.unrealized_pnl) }}
+                        ({{ '+' if p.unrealized_pnl_pct >= 0 else '' }}{{ '%.2f'|format(p.unrealized_pnl_pct) }}%)
+                    </td>
+                    <td class="{{ 'pnl-positive' if p.realized_pnl >= 0 else 'pnl-negative' }}">
+                        {{ '+' if p.realized_pnl >= 0 else '' }}${{ '%.2f'|format(p.realized_pnl) }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty-state">Henüz açık pozisyon yok. <a href="{{ url_for('transactions') }}">İşlem ekle</a>.</p>
+    {% endif %}
+</section>
+
+{% endblock %}

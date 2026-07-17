@@ -46,5 +46,28 @@ portfolio-tracker/
   (`match_fifo`). Bu, henüz ekranda kullanılmıyor — 2. ve 3. adımlarda
   (portföy özeti ve pozisyon detayı) devreye girecek.
 
-Henüz **yok**: güncel piyasa fiyatları, portföy özeti, kâr/zarar hesabı.
-Bunlar sıradaki adımlarda geliyor.
+## Adım 2 durumu: Portföy Özeti
+
+Şu an eklenen:
+- `portfolio.py`: tüm sembolleri FIFO ile hesaplayıp pozisyon listesi ve
+  toplamları çıkaran modül (gerçekleşmemiş/gerçekleşmiş K/Z, maliyet
+  bazı, piyasa değeri).
+- `/` (Özet) sayfası: toplam portföy değeri, gerçekleşmemiş K/Z,
+  gerçekleşmiş K/Z (satılmış pozisyonlardan), nakit bakiyesi, net değer
+  ve **girişten itibaren (all-time) performans** ($ ve %).
+- Nakit hareketi ekleme formu (yatırım / çekim) — `cash_flows` tablosuna
+  yazıyor. Nakit bakiyesi = yatırılan sermaye − çekilen − alımlar +
+  satımlar.
+- Pozisyonlar tablosu: her sembol için adet, ortalama maliyet, güncel
+  fiyat, piyasa değeri, K/Z.
+
+**Önemli:** Güncel fiyat API'si henüz bağlı değil, bu yüzden "güncel
+fiyat" olarak o sembole ait **son işlem fiyatı** kullanılıyor (tabloda
+"(son işlem fiyatı)" notuyla belirtiliyor). Aynı sebeple günlük /
+haftalık / aylık / YTD performans karşılaştırmaları da henüz yok — bunlar
+geçmiş piyasa fiyatı gerektiriyor ve 4. adımda (yfinance entegrasyonu)
+eklenecek. Girişten itibaren (all-time) performans ise geçmiş fiyata
+ihtiyaç duymadığı için şimdiden doğru hesaplanıyor.
+
+Henüz **yok**: pozisyon detay sayfası (açık lotlar, sembole ait işlem
+geçmişi), canlı fiyat, zaman dilimi performansı, etiket/tarih filtreleme.

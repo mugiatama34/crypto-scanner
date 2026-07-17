@@ -9,7 +9,7 @@
 <body>
     <nav class="topnav">
         <span class="brand">Portföy Takip</span>
-        <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'dashboard' else '' }}">Özet</a>
+        <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' else '' }}">Özet</a>
         <a href="{{ url_for('transactions') }}" class="{{ 'active' if request.endpoint == 'transactions' else '' }}">İşlemler</a>
     </nav>
     <main class="container">

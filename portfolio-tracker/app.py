@@ -3,6 +3,7 @@ from datetime import date
 from flask import Flask, flash, redirect, render_template, request, url_for
 
 import db
+import portfolio
 
 app = Flask(__name__)
 app.secret_key = "portfolio-tracker-local"  # sadece flash mesajlari icin, tek kullanicili yerel araç
@@ -11,8 +12,58 @@ db.init_db()
 
 
 @app.route("/")
-def index():
-    return redirect(url_for("transactions"))
+def dashboard():
+    conn = db.get_connection()
+    result = portfolio.compute_portfolio(conn)
+    cash_balance = portfolio.compute_cash_balance(conn)
+    all_time = portfolio.compute_all_time_performance(
+        conn, result["total_market_value"], cash_balance
+    )
+    conn.close()
+
+    return render_template(
+        "dashboard.html",
+        positions=result["positions"],
+        total_market_value=result["total_market_value"],
+        total_unrealized_pnl=result["total_unrealized_pnl"],
+        total_unrealized_pnl_pct=result["total_unrealized_pnl_pct"],
+        total_realized_pnl=result["total_realized_pnl"],
+        total_realized_pnl_pct=result["total_realized_pnl_pct"],
+        cash_balance=cash_balance,
+        all_time=all_time,
+        today=date.today().isoformat(),
+    )
+
+
+@app.route("/cash/add", methods=["POST"])
+def add_cash_flow():
+    form = request.form
+    flow_type = form.get("flow_type")
+    flow_date = form.get("flow_date")
+
+    try:
+        amount = float(form.get("amount", ""))
+    except ValueError:
+        flash("Tutar sayısal olmalı.", "error")
+        return redirect(url_for("dashboard"))
+
+    if flow_type not in ("deposit", "withdrawal") or not flow_date or amount <= 0:
+        flash("Tür, tarih ve pozitif bir tutar girmelisin.", "error")
+        return redirect(url_for("dashboard"))
+
+    note = form.get("note", "").strip() or None
+
+    conn = db.get_connection()
+    conn.execute(
+        "INSERT INTO cash_flows (flow_date, flow_type, amount, note) VALUES (?, ?, ?, ?)",
+        (flow_date, flow_type, amount, note),
+    )
+    conn.commit()
+    conn.close()
+
+    label = "Yatırım" if flow_type == "deposit" else "Çekim"
+    flash(f"{label} kaydedildi.", "success")
+    return redirect(url_for("dashboard"))
 
 
 @app.route("/transactions")
