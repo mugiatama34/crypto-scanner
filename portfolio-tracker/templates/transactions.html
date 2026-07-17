@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}İşlemler - Portföy Takip{% endblock %}
+{% block content %}
+
+<section class="card">
+    <h2>Yeni İşlem Ekle</h2>
+    <form method="post" action="{{ url_for('add_transaction') }}" class="tx-form">
+        <div class="field">
+            <label for="symbol">Sembol</label>
+            <input type="text" id="symbol" name="symbol" placeholder="örn. AAPL" required>
+        </div>
+        <div class="field">
+            <label for="tx_type">İşlem Tipi</label>
+            <select id="tx_type" name="tx_type" required>
+                <option value="buy">Alım</option>
+                <option value="sell">Satım</option>
+            </select>
+        </div>
+        <div class="field">
+            <label for="tx_date">Tarih</label>
+            <input type="date" id="tx_date" name="tx_date" value="{{ today }}" required>
+        </div>
+        <div class="field">
+            <label for="quantity">Adet</label>
+            <input type="number" id="quantity" name="quantity" step="any" min="0" required>
+        </div>
+        <div class="field">
+            <label for="price">Fiyat ($)</label>
+            <input type="number" id="price" name="price" step="any" min="0" required>
+        </div>
+        <div class="field">
+            <label for="tag">Kategori / Tema</label>
+            <input type="text" id="tag" name="tag" placeholder="örn. AI/Teknoloji" list="tag-options">
+            <datalist id="tag-options">
+                {% for tag in tags %}
+                <option value="{{ tag }}">
+                {% endfor %}
+            </datalist>
+        </div>
+        <div class="field field-wide">
+            <label for="note">Not (tez / katalizör / neden)</label>
+            <textarea id="note" name="note" rows="2" placeholder="Bu işlemi neden yaptım?"></textarea>
+        </div>
+        <div class="field field-wide">
+            <button type="submit">İşlemi Kaydet</button>
+        </div>
+    </form>
+</section>
+
+<section class="card">
+    <h2>İşlem Geçmişi</h2>
+    {% if transactions %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Tarih</th>
+                    <th>Sembol</th>
+                    <th>Tip</th>
+                    <th>Adet</th>
+                    <th>Fiyat</th>
+                    <th>Toplam</th>
+                    <th>Etiket</th>
+                    <th>Not</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for tx in transactions %}
+                <tr>
+                    <td>{{ tx.tx_date }}</td>
+                    <td class="symbol">{{ tx.symbol }}</td>
+                    <td><span class="badge badge-{{ tx.tx_type }}">{{ 'Alım' if tx.tx_type == 'buy' else 'Satım' }}</span></td>
+                    <td>{{ tx.quantity }}</td>
+                    <td>${{ '%.2f'|format(tx.price) }}</td>
+                    <td>${{ '%.2f'|format(tx.total) }}</td>
+                    <td>{% if tx.tag %}<span class="tag-pill">{{ tx.tag }}</span>{% endif %}</td>
+                    <td class="note-cell">{{ tx.note or '' }}</td>
+                    <td>
+                        <form method="post" action="{{ url_for('delete_transaction', tx_id=tx.id) }}"
+                              onsubmit="return confirm('Bu işlemi silmek istediğinize emin misiniz?');">
+                            <button type="submit" class="btn-link btn-danger">Sil</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty-state">Henüz işlem yok. Yukarıdaki formdan ilk işlemini ekle.</p>
+    {% endif %}
+</section>
+
+{% endblock %}
